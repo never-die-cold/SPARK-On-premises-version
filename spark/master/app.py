@@ -1,0 +1,215 @@
+"""FastAPI application: cluster API + OpenAI-compatible gateway + dashboard."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from pathlib import Path
+from contextlib import asynccontextmanager
+from typing import Any, Optional
+
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+
+from spark.master.deployer import Deployer
+from spark.master.discovery import DiscoveryListener
+from spark.master.planner import PlanError
+from spark.master.registry import DeviceRegistry
+from spark.modelreg import ModelRegistry
+from spark.protocol import DEFAULT_MASTER_PORT
+
+log = logging.getLogger(__name__)
+
+DASHBOARD = Path(__file__).parent / "dashboard" / "index.html"
+
+
+def create_app(
+    *,
+    registry: Optional[DeviceRegistry] = None,
+    models: Optional[ModelRegistry] = None,
+    deployer: Optional[Deployer] = None,
+    start_discovery: bool = True,
+    http_port: int = DEFAULT_MASTER_PORT,
+) -> FastAPI:
+    registry = registry or DeviceRegistry()
+    models = models or ModelRegistry.load()
+    deployer = deployer or Deployer(registry, models, token="")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
+        listener = DiscoveryListener(registry, http_port) if start_discovery else None
+        if listener:
+            listener.start()
+        watcher = asyncio.create_task(_degradation_watch(deployer, registry))
+        yield
+        watcher.cancel()
+        if listener:
+            listener.stop()
+        await app.state.client.aclose()
+
+    app = FastAPI(title="SPARK On-premises master", lifespan=lifespan)
+    app.state.registry = registry
+    app.state.models = models
+    app.state.deployer = deployer
+
+    # ---------------- cluster management ----------------
+
+    @app.post("/api/heartbeat")
+    async def heartbeat(req: Request) -> dict:
+        try:
+            registry.upsert(await req.json())
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(400, str(exc))
+        return {"ok": True}
+
+    @app.get("/api/devices")
+    async def devices() -> list[dict]:
+        return registry.snapshot()
+
+    @app.get("/api/models")
+    async def list_models() -> list[dict]:
+        return [
+            {
+                "name": m.name,
+                "approx_gb": m.approx_gb,
+                "ctx": m.ctx,
+                "desc": m.desc,
+                "url": m.url,
+            }
+            for m in models.as_list()
+        ]
+
+    @app.get("/api/deployments")
+    async def deployments() -> list[dict]:
+        return deployer.deployments()
+
+    @app.post("/api/deploy")
+    async def deploy(req: Request) -> dict:
+        body = await req.json()
+        name = body.get("model", "")
+        if models.get(name) is None:
+            raise HTTPException(404, f"unknown model {name!r}; see /api/models")
+        try:
+            dep = deployer.deploy(name)
+        except KeyError:
+            raise HTTPException(404, f"unknown model {name!r}")
+        except (RuntimeError, PlanError) as exc:
+            raise HTTPException(409, str(exc))
+        return dep.to_dict()
+
+    @app.post("/api/undeploy")
+    async def undeploy(req: Request) -> dict:
+        body = await req.json()
+        name = body.get("model", "")
+        if not deployer.undeploy(name):
+            raise HTTPException(404, f"no deployment for {name!r}")
+        return {"model": name, "status": "stopping"}
+
+    @app.get("/api/summary")
+    async def summary() -> dict:
+        devs = registry.snapshot()
+        deps = deployer.deployments()
+        return {
+            "ts": time.time(),
+            "devices_online": sum(1 for d in devs if d["online"]),
+            "devices_total": len(devs),
+            "deployments_active": sum(1 for d in deps if d["status"] == "active"),
+            "devices": devs,
+            "deployments": deps,
+            "models": [m["name"] for m in await list_models()],
+        }
+
+    # ---------------- OpenAI-compatible gateway ----------------
+
+    @app.get("/v1/models")
+    async def v1_models() -> dict:
+        deps = [d for d in deployer.deployments() if d["status"] == "active"]
+        return {
+            "object": "list",
+            "data": [
+                {"id": d["model"], "object": "model", "owned_by": "spark"} for d in deps
+            ],
+        }
+
+    async def _route_to_driver(model: str) -> str:
+        dep = deployer.active_for(model)
+        if dep is None:
+            available = [d["model"] for d in deployer.deployments() if d["status"] == "active"]
+            raise HTTPException(
+                404,
+                f"model {model!r} is not deployed; active models: {available or 'none'}; "
+                f"POST /api/deploy to start one",
+            )
+        if dep.status == "degraded":
+            raise HTTPException(503, f"model {model!r} is degraded (node offline); retry later")
+        return dep.driver_base_url
+
+    async def _proxy(request: Request, model: str, path: str) -> StreamingResponse:
+        base = await _route_to_driver(model)
+        url = f"{base}{path}"
+        body = await request.body()
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() in ("content-type", "accept", "authorization")}
+        client: httpx.AsyncClient = request.app.state.client
+
+        upstream = await client.send(
+            client.build_request(request.method, url, content=body, headers=headers),
+            stream=True,
+        )
+
+        async def relay():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+
+        resp_headers = {
+            k: v for k, v in upstream.headers.items()
+            if k.lower() in ("content-type", "cache-control")
+        }
+        return StreamingResponse(relay(), status_code=upstream.status_code,
+                                 headers=resp_headers, background=None)
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        body = await request.json()
+        model = body.get("model", "")
+        return await _proxy(request, model, "/v1/chat/completions")
+
+    @app.post("/v1/completions")
+    async def completions(request: Request):
+        body = await request.json()
+        model = body.get("model", "")
+        return await _proxy(request, model, "/v1/completions")
+
+    # ---------------- dashboard ----------------
+
+    @app.get("/")
+    async def index() -> FileResponse:
+        return FileResponse(DASHBOARD)
+
+    @app.exception_handler(httpx.HTTPError)
+    async def upstream_error(request: Request, exc: httpx.HTTPError):
+        return JSONResponse(status_code=502, content={"error": f"upstream unreachable: {exc}"})
+
+    return app
+
+
+async def _degradation_watch(deployer: Deployer, registry: DeviceRegistry) -> None:
+    """Flip active deployments to degraded when their nodes miss heartbeats."""
+    while True:
+        await asyncio.sleep(10)
+        for dep in deployer.deployments():
+            if dep["status"] not in ("active",):
+                continue
+            nodes = [dep["driver_device_id"], *dep["worker_device_ids"]]
+            if any(not registry.is_online(n) for n in nodes):
+                d = deployer.active_for(dep["model"])
+                if d is not None and d.status == "active":
+                    d.status = "degraded"
+                    d.error = "one or more nodes stopped heartbeating"
+                    log.warning("deployment %s degraded", dep["model"])

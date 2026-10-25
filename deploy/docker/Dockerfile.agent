@@ -1,0 +1,21 @@
+# SPARK agent 镜像：设备侧守护进程（监管 llama.cpp worker）
+# 在容器内运行 agent 适合把旧服务器/NAS 纳入集群。
+FROM golang:1.23 AS build
+WORKDIR /src
+COPY agent/go.mod agent/go.sum ./
+RUN go mod download
+COPY agent ./
+RUN CGO_ENABLED=0 go build -o /out/spark-agent .
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/spark-agent /usr/local/bin/spark-agent
+# llama.cpp 引擎由 agent 首次运行时自动下载到 /data
+ENV SPARK_DATA_DIR=/data
+VOLUME /data
+
+# 3970/udp: 发现；3971/tcp: 控制；50052/tcp: rpc-server worker
+EXPOSE 3970/udp 3971/tcp 50052
+
+CMD ["spark-agent"]

@@ -1,0 +1,24 @@
+# Normalize line endings repo-wide.
+* text=auto
+
+# Scripts MUST stay LF or they break on Linux/Termux/macOS
+*.sh   text eol=lf
+*.bash text eol=lf
+Dockerfile* text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Sources
+*.go   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.html text eol=lf
+
+# Windows files keep CRLF
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+
+# Binaries
+*.gguf binary
+*.zip  binary
+*.png  binary

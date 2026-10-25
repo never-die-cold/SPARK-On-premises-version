@@ -1,0 +1,42 @@
+# SPARK On-premises — Docker Compose 示例
+#
+# Linux 下强烈建议 host 网络（UDP 广播发现 + rpc 低延迟都能正常工作）：
+#   docker compose -f deploy/docker/docker-compose.yml up -d
+#
+# Docker Desktop（Windows/macOS）下广播经常被 NAT 吞掉：
+#   给 agent 加环境 SPARK_MASTER=宿主机IP:8000 走静态指定。
+services:
+  master:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.master
+    network_mode: host          # Linux 推荐；Docker Desktop 下改为 ports: ["8000:8000","3969:3969/udp"]
+    restart: unless-stopped
+    environment:
+      - SPARK_HF_ENDPOINT=${SPARK_HF_ENDPOINT:-}
+
+  agent1:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - agent1-data:/data
+    environment:
+      - SPARK_AGENT_NAME=docker-agent-1
+
+  agent2:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - agent2-data:/data
+    environment:
+      - SPARK_AGENT_NAME=docker-agent-2
+
+volumes:
+  agent1-data:
+  agent2-data:

@@ -1,0 +1,40 @@
+# SPARK model registry.
+# All entries are verified single-file GGUF downloads (no sharded parts).
+# approx_gb is the download size in decimal GB; the planner uses it for
+# placement decisions. Add entries here to serve more models.
+
+models:
+  - name: qwen2.5-0.5b-instruct
+    url: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+    filename: qwen2.5-0.5b-instruct-q4_k_m.gguf
+    approx_gb: 0.40
+    ctx: 4096
+    desc: 入门级，任何闲置设备都能单机承载
+
+  - name: qwen2.5-1.5b-instruct
+    url: https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+    filename: qwen2.5-1.5b-instruct-q4_k_m.gguf
+    approx_gb: 1.10
+    ctx: 4096
+    desc: 轻量对话，旧笔记本单机可用
+
+  - name: qwen2.5-3b-instruct
+    url: https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf
+    filename: qwen2.5-3b-instruct-q4_k_m.gguf
+    approx_gb: 2.01
+    ctx: 4096
+    desc: 质量/资源均衡的小模型
+
+  - name: qwen3-4b
+    url: https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf
+    filename: Qwen3-4B-Q4_K_M.gguf
+    approx_gb: 2.65
+    ctx: 8192
+    desc: 支持思考模式的 4B 新一代模型
+
+  - name: qwen3-8b
+    url: https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
+    filename: Qwen3-8B-Q4_K_M.gguf
+    approx_gb: 5.03
+    ctx: 8192
+    desc: 双 4GB 设备即可切分运行的 8B 模型

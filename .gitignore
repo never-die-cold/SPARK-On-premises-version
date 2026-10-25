@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+
+# Go
+agent/spark-agent
+agent/spark-agent.exe
+*.test
+*.out
+
+# Runtime artifacts
+data/
+models/*.gguf
+benchmarks/results/*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ZCode session artifacts
+.zcode/

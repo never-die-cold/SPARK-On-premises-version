@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPARK On-premises 控制台</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#252a34; --fg:#e8eaf0; --dim:#8b93a3;
+          --ok:#3fb950; --bad:#f85149; --warn:#d29922; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  header { display:flex; align-items:baseline; gap:14px; padding:18px 24px 6px; }
+  h1 { font-size:20px; margin:0; }
+  h1 small { color:var(--dim); font-weight:normal; font-size:12px; }
+  main { padding:10px 24px 40px; max-width:1100px; margin:0 auto; }
+  .stats { display:flex; gap:14px; flex-wrap:wrap; margin:12px 0; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:12px 18px; min-width:130px; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--dim); font-size:12px; }
+  section { margin-top:26px; }
+  h2 { font-size:15px; color:var(--dim); border-bottom:1px solid var(--line); padding-bottom:8px; }
+  table { width:100%; border-collapse:collapse; background:var(--card);
+          border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:normal; font-size:12px; }
+  tr:last-child td { border-bottom:none; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; }
+  .on  { background:var(--ok); box-shadow:0 0 6px var(--ok); }
+  .off { background:var(--bad); }
+  .tag { display:inline-block; padding:1px 8px; border-radius:20px; font-size:12px;
+         border:1px solid var(--line); color:var(--dim); margin:1px; }
+  .tag.active { color:var(--ok); border-color:var(--ok); }
+  .tag.degraded, .tag.failed { color:var(--bad); border-color:var(--bad); }
+  .tag.provisioning { color:var(--warn); border-color:var(--warn); }
+  .bar { margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; }
+  select, button, input { background:#20242e; color:var(--fg); border:1px solid var(--line);
+         border-radius:8px; padding:8px 12px; font:inherit; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  #toast { position:fixed; bottom:20px; right:20px; background:var(--card);
+           border:1px solid var(--line); border-radius:10px; padding:10px 16px;
+           display:none; max-width:420px; }
+  .mono { font-family:Consolas, monospace; font-size:12px; color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔥 SPARK <small>On-premises 控制台</small></h1>
+  <span class="mono" id="master-addr"></span>
+</header>
+<main>
+  <div class="stats">
+    <div class="stat"><b id="n-dev">–</b><span>在线设备 / 总数</span></div>
+    <div class="stat"><b id="n-mem">–</b><span>集群可用内存</span></div>
+    <div class="stat"><b id="n-dep">–</b><span>活跃部署</span></div>
+  </div>
+
+  <section>
+    <h2>部署模型</h2>
+    <div class="bar">
+      <select id="model"></select>
+      <button onclick="deploy()">部署</button>
+      <button onclick="undeploy()">卸载所选</button>
+      <span class="mono">部署耗时取决于下载速度；切分模式会将模型分布到多台设备</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>部署列表</h2>
+    <table><thead><tr>
+      <th>模型</th><th>模式</th><th>驱动节点</th><th>RPC 节点</th><th>状态</th><th>操作</th>
+    </tr></thead><tbody id="deps"><tr><td colspan="6" class="mono">加载中…</td></tr></tbody></table>
+  </section>
+
+  <section>
+    <h2>设备</h2>
+    <table><thead><tr>
+      <th></th><th>名称</th><th>平台</th><th>CPU</th><th>内存(可用/总量)</th><th>GPU</th><th>worker</th>
+    </tr></thead><tbody id="devs"><tr><td colspan="7" class="mono">等待设备加入…（在各设备上运行 spark-agent）</td></tr></tbody></table>
+  </section>
+
+  <section>
+    <h2>调用示例</h2>
+    <pre class="mono">curl <span id="base"></span>/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"qwen2.5-3b-instruct","messages":[{"role":"user","content":"你好，星火"}]}'</pre>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+function toast(msg){ const t=$("toast"); t.textContent=msg; t.style.display="block";
+  clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none", 4000); }
+function gb(bytes){ return (bytes/1024**3).toFixed(1)+" GB"; }
+
+async function refresh(){
+  try{
+    const s = await (await fetch("/api/summary")).json();
+    $("master-addr").textContent = location.host;
+    $("base").textContent = location.origin;
+    $("n-dev").textContent = s.devices_online + " / " + s.devices_total;
+    const mem = s.devices.filter(d=>d.online)
+      .reduce((a,d)=>a+(d.inventory.mem_available||0),0);
+    $("n-mem").textContent = gb(mem);
+    $("n-dep").textContent = s.deployments_active;
+
+    $("model").innerHTML = s.models.map(m=>`<option>${m}</option>`).join("");
+
+    $("deps").innerHTML = s.deployments.length ? s.deployments.map(d=>`
+      <tr>
+        <td>${d.model}</td>
+        <td><span class="tag">${d.mode||"-"}</span></td>
+        <td class="mono">${d.driver_device_id||"-"}</td>
+        <td class="mono">${(d.worker_device_ids||[]).join("<br>")||"-"}</td>
+        <td><span class="tag ${d.status}">${d.status}${d.error?" · "+d.error:""}</span></td>
+        <td><button onclick="undeployName('${d.model}')">停止</button></td>
+      </tr>`).join("")
+      : `<tr><td colspan="6" class="mono">尚未部署；选择模型点击"部署"</td></tr>`;
+
+    $("devs").innerHTML = s.devices.length ? s.devices.map(d=>{
+      const inv=d.inventory||{};
+      const gpus=(inv.gpus||[]).map(g=>g.name).join(", ")||"—";
+      const workers=(d.workers||[]).map(w=>`${w.id}:${w.state}`).join(", ")||"—";
+      return `<tr>
+        <td><span class="dot ${d.online?"on":"off"}"></span></td>
+        <td>${d.name}<div class="mono">${d.device_id}</div></td>
+        <td class="mono">${inv.os||"?"}/${inv.arch||"?"}</td>
+        <td class="mono">${inv.cpu_cores||"?"} 核</td>
+        <td class="mono">${gb(inv.mem_available||0)} / ${gb(inv.mem_total||0)}</td>
+        <td class="mono">${gpus}</td>
+        <td class="mono">${workers}</td>
+      </tr>`;}).join("")
+      : `<tr><td colspan="7" class="mono">等待设备加入…（在各设备上运行 spark-agent）</td></tr>`;
+  }catch(e){ toast("刷新失败: "+e); }
+}
+
+async function deploy(){
+  const model = $("model").value;
+  if(!model) return;
+  toast(`正在规划 ${model} 的部署…`);
+  const r = await fetch("/api/deploy",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model})});
+  const j = await r.json();
+  toast(r.ok ? `${model} 部署中: ${j.mode} 模式（${(j.reasons||[]).slice(-1)[0]||""}）` : `失败: ${j.detail||JSON.stringify(j)}`);
+  refresh();
+}
+async function undeployName(m){
+  await fetch("/api/undeploy",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:m})});
+  toast(`${m} 停止中…`); refresh();
+}
+function undeploy(){ const m=$("model").value; if(m) undeployName(m); }
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
