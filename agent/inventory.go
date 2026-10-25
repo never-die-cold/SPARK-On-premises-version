@@ -114,12 +114,71 @@ func interfaceAddrs() (ips, macs []string) {
 	return ips, macs
 }
 
+// virtualIF reports interface names that carry NAT/VM addresses (WSL,
+// Hyper-V, Docker, VPN taps) which must not be advertised as the device's
+// cluster address.
+func virtualIF(name string) bool {
+	n := strings.ToLower(name)
+	switch {
+	case strings.Contains(n, "vethernet"), strings.Contains(n, "wsl"),
+		strings.Contains(n, "docker"), strings.Contains(n, "vmware"),
+		strings.Contains(n, "virtualbox"), strings.Contains(n, "loopback"),
+		strings.Contains(n, "tap"), strings.HasPrefix(n, "veth"),
+		strings.HasPrefix(n, "br-"), strings.HasPrefix(n, "docker"):
+		return true
+	}
+	return false
+}
+
+// preferredIP returns the source address the default route would use,
+// which is by definition reachable from the rest of the LAN; falls back to
+// the first physical-interface IPv4.
+func preferredIP() string {
+	conn, err := net.DialTimeout("udp", "223.5.5.5:53", time.Second)
+	if err == nil {
+		defer conn.Close()
+		if host, _, err := net.SplitHostPort(conn.LocalAddr().String()); err == nil && host != "" {
+			ip := net.ParseIP(host)
+			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				return host
+			}
+		}
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "127.0.0.1"
+	}
+	for _, ifc := range ifaces {
+		if virtualIF(ifc.Name) {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+				continue
+			}
+			return ip4.String()
+		}
+	}
+	return "127.0.0.1"
+}
+
 // advertiseIP picks the address agents announce to the cluster: explicit
-// flag first, then the first global IPv4 (interface order is a reasonable
-// proxy for the default route on stock home setups).
+// flag first, then the default-route source address, then any global IPv4.
 func advertiseIP(inv Inventory, override string) string {
 	if override != "" {
 		return override
+	}
+	if ip := preferredIP(); ip != "127.0.0.1" {
+		return ip
 	}
 	if len(inv.IPs) > 0 {
 		return inv.IPs[0]

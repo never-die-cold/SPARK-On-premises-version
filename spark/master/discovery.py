@@ -74,26 +74,26 @@ class DiscoveryListener:
         last_beacon = 0.0
         while not self._stop.is_set():
             try:
-                data, _addr = sock.recvfrom(65536)
+                data, addr = sock.recvfrom(65536)
             except socket.timeout:
                 pass
             except OSError:
                 break
             else:
-                self._handle(data)
+                self._handle(data, addr[0])
             now = time.time()
             if now - last_beacon >= 5.0:
                 self._beacon(sock)
                 last_beacon = now
         sock.close()
 
-    def _handle(self, data: bytes) -> None:
+    def _handle(self, data: bytes, observed_ip: str = "") -> None:
         try:
             text = data.decode("utf-8", errors="replace")
             if not text.startswith(PACKET_ANNOUNCE):
                 return
             announce = json.loads(text[len(PACKET_ANNOUNCE):])
-            self.registry.upsert(announce)
+            self.registry.upsert(announce, observed_ip=observed_ip, source="udp")
         except (ValueError, KeyError) as exc:
             log.debug("bad announce packet: %s", exc)
 

@@ -40,6 +40,18 @@ func exeName(base string) string {
 	return base
 }
 
+// locateBin resolves a binary that llama.cpp has renamed across releases
+// (rpc-server became ggml-rpc-server). candidates are bare names.
+func locateBin(dir string, candidates ...string) string {
+	for _, c := range candidates {
+		p := filepath.Join(dir, exeName(c))
+		if fileExists(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 // assetPatternFor maps (goos, goarch) to the llama.cpp release asset suffix.
 // Verified against nightly asset naming, e.g. llama-b11878-bin-win-cpu-x64.zip.
 func assetPatternFor(goos, goarch string) (string, error) {
@@ -127,26 +139,62 @@ func (e *EngineManager) resolveTag(ctx context.Context) string {
 	return defaultLLaMATag
 }
 
+// installedAt returns engine paths if tag is fully installed in dataDir.
+func installedAt(dataDir, tag string) (EngineInfo, bool) {
+	dir := filepath.Join(dataDir, "engines", tag)
+	server := locateBin(dir, "llama-server")
+	rpc := locateBin(dir, "rpc-server", "ggml-rpc-server")
+	if server != "" && rpc != "" && fileExists(filepath.Join(dir, "spark-ok")) {
+		return EngineInfo{Tag: tag, Dir: dir, ServerPath: server, RPCPath: rpc}, true
+	}
+	return EngineInfo{}, false
+}
+
+// cachedTag persists the last tag resolved from GitHub so steady-state
+// Ensures never touch the network (also survives API rate limits).
+func (e *EngineManager) cachedTag() string {
+	b, err := os.ReadFile(filepath.Join(e.dataDir, "engines", "resolved-tag"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func (e *EngineManager) writeCachedTag(tag string) {
+	_ = os.MkdirAll(filepath.Join(e.dataDir, "engines"), 0o755)
+	_ = os.WriteFile(filepath.Join(e.dataDir, "engines", "resolved-tag"), []byte(tag), 0o644)
+}
+
 // Ensure returns an EngineInfo with absolute binary paths, downloading and
-// extracting the llama.cpp release on first use. Safe to call repeatedly.
+// extracting the llama.cpp release on first use. Local installs are checked
+// FIRST (pinned tag, cached tag, default tag); the GitHub API is only hit
+// when nothing is installed locally. Safe to call repeatedly.
 func (e *EngineManager) Ensure(ctx context.Context) (EngineInfo, error) {
 	if e.cfg.LLaMAPath != "" {
 		dir := e.cfg.LLaMAPath
-		server := filepath.Join(dir, exeName("llama-server"))
-		rpc := filepath.Join(dir, exeName("rpc-server"))
-		if fileExists(server) && fileExists(rpc) {
+		server := locateBin(dir, "llama-server")
+		rpc := locateBin(dir, "rpc-server", "ggml-rpc-server")
+		if server != "" && rpc != "" {
 			return EngineInfo{Tag: "custom", Dir: dir, ServerPath: server, RPCPath: rpc}, nil
 		}
 		return EngineInfo{}, fmt.Errorf("SPARK_LLAMA_PATH=%q is missing llama-server/rpc-server binaries", dir)
 	}
 
-	tag := e.resolveTag(ctx)
-	dir := filepath.Join(e.dataDir, "engines", tag)
-	server := filepath.Join(dir, exeName("llama-server"))
-	rpc := filepath.Join(dir, exeName("rpc-server"))
-	marker := filepath.Join(dir, "spark-ok")
-	if fileExists(server) && fileExists(rpc) && fileExists(marker) {
-		return EngineInfo{Tag: tag, Dir: dir, ServerPath: server, RPCPath: rpc}, nil
+	// fast path: something already installed locally
+	for _, tag := range e.localTags() {
+		if info, ok := installedAt(e.dataDir, tag); ok {
+			return info, nil
+		}
+	}
+
+	tag := e.cfg.LLaMATag
+	if tag == "" {
+		tag = e.resolveTag(ctx)
+	}
+	e.writeCachedTag(tag)
+
+	if info, ok := installedAt(e.dataDir, tag); ok {
+		return info, nil
 	}
 
 	pattern, err := assetPatternFor(runtime.GOOS, runtime.GOARCH)
@@ -157,15 +205,29 @@ func (e *EngineManager) Ensure(ctx context.Context) (EngineInfo, error) {
 	if err != nil {
 		return EngineInfo{}, err
 	}
+	dir := filepath.Join(e.dataDir, "engines", tag)
 	if err := extractArchive(asset, dir); err != nil {
 		return EngineInfo{}, fmt.Errorf("extract %s: %w", filepath.Base(asset), err)
 	}
 	_ = os.Remove(asset)
-	if !fileExists(server) || !fileExists(rpc) {
-		return EngineInfo{}, fmt.Errorf("archive did not contain llama-server/rpc-server (looked in %s)", dir)
+	if info, ok := installedAt(e.dataDir, tag); ok {
+		_ = os.WriteFile(filepath.Join(dir, "spark-ok"), []byte(pattern), 0o644)
+		return info, nil
 	}
-	_ = os.WriteFile(marker, []byte(pattern), 0o644)
-	return EngineInfo{Tag: tag, Dir: dir, ServerPath: server, RPCPath: rpc}, nil
+	return EngineInfo{}, fmt.Errorf("archive did not contain llama-server/rpc-server (looked in %s)", dir)
+}
+
+// localTags lists candidate tags to probe on disk, in priority order.
+func (e *EngineManager) localTags() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, t := range []string{e.cfg.LLaMATag, e.cachedTag(), defaultLLaMATag} {
+		if t != "" && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (e *EngineManager) downloadAsset(ctx context.Context, tag, pattern string) (string, error) {
@@ -184,9 +246,9 @@ func (e *EngineManager) downloadAsset(ctx context.Context, tag, pattern string) 
 func (e *EngineManager) Current() EngineInfo {
 	if e.cfg.LLaMAPath != "" {
 		dir := e.cfg.LLaMAPath
-		server := filepath.Join(dir, exeName("llama-server"))
-		rpc := filepath.Join(dir, exeName("rpc-server"))
-		if fileExists(server) && fileExists(rpc) {
+		server := locateBin(dir, "llama-server")
+		rpc := locateBin(dir, "rpc-server", "ggml-rpc-server")
+		if server != "" && rpc != "" {
 			return EngineInfo{Tag: "custom", Dir: dir, ServerPath: server, RPCPath: rpc}
 		}
 		return EngineInfo{}
@@ -196,9 +258,9 @@ func (e *EngineManager) Current() EngineInfo {
 		tag = defaultLLaMATag
 	}
 	dir := filepath.Join(e.dataDir, "engines", tag)
-	server := filepath.Join(dir, exeName("llama-server"))
-	rpc := filepath.Join(dir, exeName("rpc-server"))
-	if fileExists(server) && fileExists(rpc) {
+	server := locateBin(dir, "llama-server")
+	rpc := locateBin(dir, "rpc-server", "ggml-rpc-server")
+	if server != "" && rpc != "" {
 		return EngineInfo{Tag: tag, Dir: dir, ServerPath: server, RPCPath: rpc}
 	}
 	return EngineInfo{}

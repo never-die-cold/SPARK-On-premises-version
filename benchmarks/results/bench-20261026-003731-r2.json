@@ -1,0 +1,10 @@
+{
+  "ts": "2026-10-25T16:37:31.872710+00:00",
+  "model": "qwen2.5-0.5b-instruct",
+  "round": 2,
+  "ttft_s": 0.0209,
+  "tokens": 93,
+  "decode_tokens_per_s": 75.05,
+  "prompt": "用一段话介绍分布式系统的CAP定理。",
+  "master": "http://127.0.0.1:8000"
+}

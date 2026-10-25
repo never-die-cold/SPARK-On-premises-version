@@ -7,7 +7,7 @@ models:
   - name: qwen2.5-0.5b-instruct
     url: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
     filename: qwen2.5-0.5b-instruct-q4_k_m.gguf
-    approx_gb: 0.40
+    approx_gb: 0.46
     ctx: 4096
     desc: 入门级，任何闲置设备都能单机承载
 

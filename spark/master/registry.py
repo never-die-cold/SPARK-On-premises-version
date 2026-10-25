@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import ipaddress
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+
+def _is_ipv4(text: str) -> bool:
+    try:
+        ipaddress.IPv4Address(text)
+        return True
+    except ipaddress.AddressValueError:
+        return False
 
 DEFAULT_TTL_SECONDS = 15.0
 
@@ -19,6 +28,7 @@ class Device:
     workers: list[dict[str, Any]] = field(default_factory=list)
     last_seen: float = 0.0
     first_seen: float = 0.0
+    tcp_observed_host: str = ""
 
     @property
     def host(self) -> str:
@@ -45,24 +55,47 @@ class DeviceRegistry:
         self._lock = threading.RLock()
         self._devices: dict[str, Device] = {}
 
-    def upsert(self, announce: dict[str, Any]) -> Device:
+    def upsert(self, announce: dict[str, Any], observed_ip: str = "",
+               source: str = "tcp") -> Device:
+        """Register/refresh a device.
+
+        observed_ip is the packet's source address. A TCP heartbeat source
+        is a strong signal (that interface demonstrably reaches the master),
+        so it wins and stays sticky; UDP announce sources depend on which
+        interface the broadcast left through and are only used until the
+        first TCP observation arrives.
+        """
         device_id = announce.get("device_id")
         if not device_id:
             raise ValueError("announce missing device_id")
         now = time.time()
+        control_addr = announce.get("control_addr", "")
+        if observed_ip and control_addr and _is_ipv4(observed_ip):
+            host, _, port = control_addr.rpartition(":")
+            if host and host != observed_ip:
+                use_observed = (
+                    source == "tcp"
+                    or not self.get(device_id)
+                    or not self.get(device_id).tcp_observed_host
+                )
+                if use_observed:
+                    control_addr = f"{observed_ip}:{port or 3971}"
+        tcp_host = observed_ip if source == "tcp" and _is_ipv4(observed_ip) else ""
         with self._lock:
             dev = self._devices.get(device_id)
             if dev is None:
                 dev = Device(
                     device_id=device_id,
                     name=announce.get("name", device_id),
-                    control_addr=announce.get("control_addr", ""),
+                    control_addr=control_addr,
                     first_seen=now,
                 )
                 self._devices[device_id] = dev
             dev.name = announce.get("name", dev.name)
-            if announce.get("control_addr"):
-                dev.control_addr = announce["control_addr"]
+            if control_addr:
+                dev.control_addr = control_addr
+            if tcp_host:
+                dev.tcp_observed_host = tcp_host
             if "inventory" in announce:
                 dev.inventory = announce["inventory"] or {}
             if "workers" in announce:

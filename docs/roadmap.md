@@ -10,7 +10,8 @@
 - [x] 模型注册表 models.yaml + HF 镜像（HF_ENDPOINT）支持
 - [x] Windows / Linux / macOS / Termux / Docker 部署脚本
 - [x] CI（pytest + go test + 六平台交叉编译）
-- [ ] 两台真实设备端到端实测（单机多进程已验证逻辑）
+- [x] 单机端到端验证（发现→部署→网关对话→基准→卸载，见 benchmarks/README.md）
+- [ ] 两台真实设备端到端实测（split 模式的 TTFT/吞吐矩阵）
 
 ## M2 — 生命周期与安全
 - [ ] 故障自动重分片（节点掉线后在剩余节点重建部署）

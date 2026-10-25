@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -81,6 +84,13 @@ func (m *DownloadManager) run(job *DownloadStatus, dataDir string, req DownloadR
 		job.Received, job.Total = received, total
 		m.mu.Unlock()
 	}
+	// seed the job with bytes already on disk so UIs show real progress
+	// the moment a resume starts
+	if st, err := os.Stat(tmp); err == nil {
+		m.mu.Lock()
+		job.Received = st.Size()
+		m.mu.Unlock()
+	}
 	if err := downloadTo(context.Background(), realURL, tmp, progress); err != nil {
 		m.fail(job, err)
 		return
@@ -147,43 +157,113 @@ func RewriteHFEndpoint(rawURL, endpoint string) string {
 	return u.String()
 }
 
-// downloadTo streams url to dest with progress callbacks; total is 0 when the
-// server does not report Content-Length.
+// downloadTo streams url to dest with progress callbacks and automatic
+// resume: on transient failures it retries with HTTP Range from the bytes
+// already on disk, so multi-GB model downloads survive flaky links.
+// total is 0 when the server does not report a size.
 func downloadTo(ctx context.Context, rawURL, dest string, progress func(received, total int64)) error {
+	const maxAttempts = 6
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * 2 * time.Second):
+			}
+		}
+		received, total, err := downloadAttempt(ctx, rawURL, dest, progress)
+		if err == nil {
+			if progress != nil {
+				progress(received, total)
+			}
+			return nil
+		}
+		lastErr = err
+		if !isRetryable(err) {
+			return err
+		}
+		log.Printf("download attempt %d/%d failed (%s bytes on disk): %v",
+			attempt+1, maxAttempts, dest, err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return fmt.Errorf("download %s failed after %d attempts: %w", rawURL, maxAttempts, lastErr)
+}
+
+// downloadAttempt performs one streaming pass, appending to an existing
+// partial file via Range when the server supports it. It is not retried
+// on permanent errors (4xx other than 416, bad URL).
+func downloadAttempt(ctx context.Context, rawURL, dest string, progress func(received, total int64)) (int64, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: HTTP %d", rawURL, resp.StatusCode)
-	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
 
 	var received int64
-	total := resp.ContentLength
+	if st, err := os.Stat(dest); err == nil && st.Size() > 0 {
+		received = st.Size()
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", received))
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return received, 0, retryable(fmt.Errorf("connect: %w", err))
+	}
+	defer resp.Body.Close()
+
+	switch {
+	case resp.StatusCode == http.StatusPartialContent: // resumed
+	case resp.StatusCode == http.StatusOK: // server ignored Range -> restart
+		received = 0
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && received > 0:
+		// already complete on disk; caller verifies via progress
+		return received, received, nil
+	default:
+		return received, 0, permanent(fmt.Errorf("HTTP %d", resp.StatusCode))
+	}
+
+	total := resp.ContentLength // 200: full size; 206: remaining bytes
 	if total < 0 {
 		total = 0
 	}
+	if cr := resp.Header.Get("Content-Range"); cr != "" {
+		// Content-Range: bytes start-end/total
+		if slash := strings.LastIndex(cr, "/"); slash >= 0 {
+			if t, err := strconv.ParseInt(cr[slash+1:], 10, 64); err == nil && t > 0 {
+				total = t
+			}
+		}
+	}
+	if resp.StatusCode == http.StatusPartialContent && total <= received && resp.ContentLength >= 0 {
+		// server answered 206 without a usable Content-Range
+		total = received + resp.ContentLength
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return received, total, permanent(err)
+	}
+	openFlags := os.O_CREATE | os.O_WRONLY
+	if received > 0 {
+		openFlags |= os.O_APPEND
+	} else {
+		openFlags |= os.O_TRUNC
+	}
+	out, err := os.OpenFile(dest, openFlags, 0o644)
+	if err != nil {
+		return received, total, permanent(err)
+	}
+	defer out.Close()
+
 	buf := make([]byte, 1024*512)
 	var lastTick time.Time
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := out.Write(buf[:n]); werr != nil {
-				return werr
+				return received, total, permanent(werr)
 			}
 			received += int64(n)
 			if progress != nil && time.Since(lastTick) > 500*time.Millisecond {
@@ -192,17 +272,27 @@ func downloadTo(ctx context.Context, rawURL, dest string, progress func(received
 			}
 		}
 		if rerr == io.EOF {
-			break
+			return received, total, nil
 		}
 		if rerr != nil {
-			return rerr
+			return received, total, retryable(rerr)
 		}
 	}
-	if progress != nil {
-		progress(received, total)
-	}
-	return nil
 }
+
+type retryableError struct{ err error }
+
+func (e retryableError) Error() string { return e.err.Error() }
+func (e retryableError) Unwrap() error { return e.err }
+
+func retryable(err error) error   { return retryableError{err} }
+func permanent(err error) error   { return err }
+func isRetryable(err error) bool {
+	var re retryableError
+	return errors.As(err, &re)
+}
+
+var _ = isRetryable // used by tests
 
 func newJobID() string {
 	var b [6]byte

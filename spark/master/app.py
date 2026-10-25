@@ -60,7 +60,7 @@ def create_app(
     @app.post("/api/heartbeat")
     async def heartbeat(req: Request) -> dict:
         try:
-            registry.upsert(await req.json())
+            registry.upsert(await req.json(), observed_ip=req.client.host if req.client else "")
         except (ValueError, KeyError) as exc:
             raise HTTPException(400, str(exc))
         return {"ok": True}

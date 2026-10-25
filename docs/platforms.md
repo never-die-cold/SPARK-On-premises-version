@@ -84,10 +84,15 @@ Docker Desktop（Windows/macOS）注意：容器 NAT 会吞 UDP 广播，给 age
 ## 网络环境建议
 
 - **切分模式对带宽敏感**：rpc 链路每 token 都有跨节点流量。千兆有线舒适，Wi-Fi 5/6 可用，
-  百兆/隔离网络建议只用单机模式（规划器会自动避免吗？——不会，M2 引入带宽探测后才会）。
-- 模型下载走 HuggingFace：国内网络在 master 上设置 `SPARK_HF_ENDPOINT=https://hf-mirror.com`
-  可显著加速（该地址会随下载指令下发到 agent）。
-- 引擎下载走 GitHub Releases：如受限，可在设备上手动下载对应 tarball 解压后设置 `SPARK_LLAMA_PATH`。
+  百兆/隔离网络建议只用单机模式（M2 引入带宽探测后规划器才会自动规避）。
+- 模型下载走 HuggingFace：国内网络**强烈建议**在 master 上设置
+  `SPARK_HF_ENDPOINT=https://hf-mirror.com`（实测：被污染的 DNS 会让直连下载卡死，
+  镜像 + 断点续传稳定完成；该地址随下载指令自动下发到 agent）。
+- **VPN / Clash TUN 用户注意**：TUN 会成为默认路由（agent 按默认路由选广播地址可能选中 TUN）。
+  若 master 看到的设备地址不可达，agent 侧加 `--advertise <真实局域网IP>`，
+  或依赖 master 的心跳来源地址自动修正（TCP 观测优先，已内置）。
+- 引擎下载走 GitHub Releases：如受限，可手动下载对应 tarball 解压后设置 `SPARK_LLAMA_PATH`。
+- Windows 下杀掉 agent 后如端口仍被占用，检查是否有孤儿进程：`tasklist | findstr spark-agent`。
 
 ## 故障排查
 
