@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,6 +32,58 @@ const maxRestarts = 3
 
 func NewWorkerManager(dataDir string) *WorkerManager {
 	return &WorkerManager{workers: map[string]*worker{}, dataDir: dataDir}
+}
+
+// pidsDir holds one file per supervised worker containing its PID, so a
+// restarted agent can kill llama.cpp processes orphaned by its previous
+// life (otherwise they hold ports and eat RAM outside supervision).
+func (m *WorkerManager) pidsDir() string {
+	return filepath.Join(m.dataDir, "pids")
+}
+
+func (m *WorkerManager) writePid(id string, pid int) {
+	_ = os.MkdirAll(m.pidsDir(), 0o755)
+	_ = os.WriteFile(filepath.Join(m.pidsDir(), id+".pid"), []byte(strconv.Itoa(pid)), 0o644)
+}
+
+func (m *WorkerManager) clearPid(id string) {
+	_ = os.Remove(filepath.Join(m.pidsDir(), id+".pid"))
+}
+
+// ReapOrphans kills processes recorded by a previous agent instance that
+// this one does not supervise, then clears the records. Called once at
+// startup before any worker is launched.
+func (m *WorkerManager) ReapOrphans() {
+	entries, err := os.ReadDir(m.pidsDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".pid") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".pid")
+		if w, ok := m.workers[id]; ok && w.status.State == "running" {
+			continue // already supervised by us (not expected at startup)
+		}
+		data, err := os.ReadFile(filepath.Join(m.pidsDir(), name))
+		if err != nil {
+			_ = os.Remove(filepath.Join(m.pidsDir(), name))
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 0 {
+			_ = os.Remove(filepath.Join(m.pidsDir(), name))
+			continue
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			if err := proc.Kill(); err == nil {
+				log.Printf("reaped orphan worker %s (pid %d) from previous agent run", id, pid)
+			}
+		}
+		_ = os.Remove(filepath.Join(m.pidsDir(), name))
+	}
 }
 
 // StartRPC launches an rpc-server worker with well-known id "rpc".
@@ -138,6 +191,7 @@ func (m *WorkerManager) spawn(w *worker, workDir, bin string, args []string) err
 	w.status.PID = cmd.Process.Pid
 	w.status.StartedAt = time.Now().Unix()
 	w.status.Note = fmt.Sprintf("log: %s", w.logPath)
+	m.writePid(w.status.ID, cmd.Process.Pid)
 	log.Printf("worker %s started (pid %d): %s", w.status.ID, cmd.Process.Pid, w.status.Note)
 	return nil
 }
@@ -209,6 +263,7 @@ func (m *WorkerManager) stopLocked(id string) error {
 	}
 	w.status.State = "stopped"
 	w.status.PID = 0
+	m.clearPid(id)
 	return nil
 }
 

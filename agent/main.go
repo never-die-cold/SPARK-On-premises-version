@@ -107,6 +107,10 @@ func main() {
 		cfg.DeviceID, cfg.Name, cfg.DataDir, cfg.ControlPort)
 
 	a := NewAgent(cfg)
+	// kill llama.cpp processes orphaned by a previous agent instance so
+	// they cannot hold ports/memory outside supervision (observed live:
+	// auto-heal re-deploy landed on an orphaned llama-server)
+	a.workers.ReapOrphans()
 	if cfg.MasterHTTP != "" {
 		a.setMaster(cfg.MasterHTTP)
 	}
