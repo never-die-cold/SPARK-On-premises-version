@@ -196,6 +196,26 @@ def cmd_agent(args: argparse.Namespace) -> None:
           "  spark-agent --name my-device")
 
 
+def cmd_wake(args: argparse.Namespace) -> None:
+    _check_master()
+    with _client() as c:
+        r = c.post("/api/wake", json={"device_id": args.device_id})
+        if r.status_code != 200:
+            sys.exit(f"唤醒失败: {r.json().get('detail', r.text)}")
+        j = r.json()
+    print(f"已发送唤醒包 -> {j['device_id']} ({j['mac']}, {j['bytes_sent']} bytes)")
+    print("等待设备上线后 spark status 查看（约 30-90 秒）")
+
+
+def cmd_sleep(args: argparse.Namespace) -> None:
+    _check_master()
+    with _client() as c:
+        r = c.post("/api/sleep", json={"device_id": args.device_id})
+        if r.status_code != 200:
+            sys.exit(f"休眠指令被拒绝: {r.json().get('detail', r.text)}")
+    print(f"休眠指令已发送 -> {args.device_id}")
+
+
 # ---------------- parser ----------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -229,6 +249,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("agent", help="如何安装设备侧 agent")
     a.set_defaults(func=cmd_agent)
+
+    w = sub.add_parser("wake", help="Wake-on-LAN 唤醒一台离线设备")
+    w.add_argument("device_id")
+    w.set_defaults(func=cmd_wake)
+
+    sl = sub.add_parser("sleep", help="让一台空闲设备休眠省电（有部署时会被拒绝）")
+    sl.add_argument("device_id")
+    sl.set_defaults(func=cmd_sleep)
     return p
 
 

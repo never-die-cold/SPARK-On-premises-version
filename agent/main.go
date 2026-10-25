@@ -93,6 +93,8 @@ func (a *Agent) shutdown() {
 	os.Exit(0)
 }
 
+func (a *Agent) sleepHost() { sleepHost() }
+
 func main() {
 	cfg := loadConfig()
 	log.SetPrefix("spark-agent ")

@@ -44,9 +44,13 @@ def _subnet_broadcasts() -> list[str]:
 
 
 class DiscoveryListener:
-    def __init__(self, registry: DeviceRegistry, master_port_http: int, master_host: str = ""):
+    def __init__(self, registry: DeviceRegistry, master_port_http: int,
+                 master_host: str = "", token_required: bool = False):
         self.registry = registry
         self.master_http = f"{master_host or _local_ip()}:{master_port_http}"
+        # UDP announces carry no authentication; when a cluster token is
+        # configured, registration happens only via authenticated heartbeats.
+        self.token_required = token_required
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -88,6 +92,8 @@ class DiscoveryListener:
         sock.close()
 
     def _handle(self, data: bytes, observed_ip: str = "") -> None:
+        if self.token_required:
+            return
         try:
             text = data.decode("utf-8", errors="replace")
             if not text.startswith(PACKET_ANNOUNCE):

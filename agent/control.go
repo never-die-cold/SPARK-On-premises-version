@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -111,6 +112,23 @@ func (a *Agent) runControlServer(ln net.Listener) error {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+	})
+
+	mux.HandleFunc("POST /power/sleep", func(w http.ResponseWriter, r *http.Request) {
+		// refuse to sleep a node that is serving deployments
+		for _, wk := range a.workers.Status() {
+			if wk.State == "running" || wk.State == "restarting" {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": fmt.Sprintf("worker %s is %s; stop deployments first", wk.ID, wk.State),
+				})
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "sleeping soon"})
+		go func() {
+			time.Sleep(1 * time.Second)
+			a.sleepHost()
+		}()
 	})
 
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {

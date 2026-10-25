@@ -7,6 +7,7 @@ HTTP surface (httpx, sync -- threads, not asyncio).
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -19,6 +20,8 @@ from spark.master.planner import PlanError, plan_placement
 from spark.master.registry import DeviceRegistry
 from spark.modelreg import ModelRegistry
 from spark.protocol import DEFAULT_RPC_PORT, DEFAULT_SERVER_PORT_BASE
+
+log = logging.getLogger(__name__)
 
 AGENT_TIMEOUTS = {
     "status": httpx.Timeout(5.0),
@@ -40,6 +43,8 @@ class Deployment:
     server_port: int = 0
     reasons: list[str] = field(default_factory=list)
     error: str = ""
+    heal_attempts: int = 0
+    heal_running: bool = field(default=False, repr=False)  # in-flight guard
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -54,6 +59,7 @@ class Deployment:
             "server_port": self.server_port,
             "reasons": self.reasons,
             "error": self.error,
+            "heal_attempts": self.heal_attempts,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -161,6 +167,107 @@ class Deployer:
                 dep.touch()
         threading.Thread(target=self._stop, args=(dep,), daemon=True).start()
         return True
+
+    # ---------- self-healing ----------
+
+    HEAL_GRACE_SECONDS = 20.0   # let flaky Wi-Fi recover before re-planning
+    MAX_HEAL_ATTEMPTS = 2
+
+    def check_and_heal(self) -> None:
+        """Called by the degradation watcher. Two transitions:
+        active -> degraded when nodes stop heartbeating (schedules a heal),
+        degraded -> active when every node's heartbeat returns (the workers
+        survived the outage, so the deployment is simply live again)."""
+        for snap in self.deployments():
+            model = snap["model"]
+            nodes = [snap["driver_device_id"], *snap["worker_device_ids"]]
+            offline = [n for n in nodes if not self.registry.is_online(n)]
+
+            if snap["status"] == "degraded" and not offline:
+                with self._lock:
+                    dep = self._deployments.get(model)
+                    if dep is not None and dep.status == "degraded":
+                        dep.status = "active"
+                        dep.error = ""
+                        dep.reasons.append("nodes resumed heartbeating; deployment live again")
+                        dep.touch()
+                        log.info("deployment %s recovered", model)
+                continue
+
+            if snap["status"] != "active" or not offline:
+                if snap["status"] == "degraded" and offline:
+                    # a previous heal failed and the nodes are still gone:
+                    # keep retrying while attempts remain (watch cadence +
+                    # grace provide backoff; _heal_running prevents piles)
+                    with self._lock:
+                        dep = self._deployments.get(model)
+                        if (dep is not None and dep.status == "degraded"
+                                and not dep.heal_running
+                                and dep.heal_attempts < self.MAX_HEAL_ATTEMPTS):
+                            dep.heal_running = True
+                            threading.Thread(target=self._heal, args=(model,),
+                                             daemon=True).start()
+                continue
+            with self._lock:
+                dep = self._deployments.get(model)
+                if dep is None or dep.status != "active":
+                    continue
+                dep.status = "degraded"
+                dep.error = f"nodes offline: {', '.join(offline)}"
+                dep.heal_running = True
+                dep.touch()
+            log.warning("deployment %s degraded (%s offline); scheduling heal",
+                        model, offline)
+            threading.Thread(target=self._heal, args=(model,),
+                             daemon=True).start()
+
+    def _heal(self, model: str) -> None:
+        try:
+            self._heal_inner(model)
+        finally:
+            with self._lock:
+                dep = self._deployments.get(model)
+                if dep is not None:
+                    dep.heal_running = False
+
+    def _heal_inner(self, model: str) -> None:
+        time.sleep(self.HEAL_GRACE_SECONDS)
+        with self._lock:
+            dep = self._deployments.get(model)
+            if dep is None or dep.status != "degraded":
+                return  # recovered on its own, or user intervened
+            dep.heal_attempts += 1
+            attempt = dep.heal_attempts
+            # retire the old record so deploy() accepts the model again
+            dep.status = "stopped"
+            dep.touch()
+        log.info("auto-heal %s: attempt %d (re-planning on surviving nodes)", model, attempt)
+        self._cleanup_partial_local(model)
+        try:
+            new_dep = self.deploy(model)
+        except (KeyError, RuntimeError, PlanError) as exc:
+            with self._lock:
+                dep = self._deployments.get(model)
+                if dep is not None:
+                    if dep.heal_attempts >= self.MAX_HEAL_ATTEMPTS:
+                        dep.status = "failed"
+                    else:
+                        dep.status = "degraded"
+                    dep.error = f"auto-heal attempt {attempt} failed: {exc}"
+                    dep.touch()
+            log.warning("auto-heal %s failed: %s", model, exc)
+            return
+        with self._lock:
+            new_dep.reasons.insert(0, f"auto-heal: redeployed after node loss (attempt {attempt})")
+            new_dep.heal_attempts = attempt
+            new_dep.touch()
+
+    def _cleanup_partial_local(self, model: str) -> None:
+        """Best-effort worker cleanup for a deployment record by model name."""
+        with self._lock:
+            dep = self._deployments.get(model)
+        if dep is not None:
+            self._cleanup_partial(dep)
 
     # ---------- background flows ----------
 
