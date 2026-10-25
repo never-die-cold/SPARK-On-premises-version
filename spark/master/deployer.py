@@ -98,6 +98,22 @@ class Deployer:
 
     # ---------- writes ----------
 
+    def _pending_reserved_gb(self) -> dict[str, float]:
+        """Memory booked by in-flight deployments whose models are not yet
+        visible in heartbeats. Prevents over-committing a node while a
+        provisioning download/load is underway."""
+        with self._lock:
+            reserved: dict[str, float] = {}
+            for d in self._deployments.values():
+                if d.status not in ("provisioning", "planning"):
+                    continue
+                entry = self.models.get(d.model)
+                if entry is None:
+                    continue
+                for dev_id in [d.driver_device_id, *d.worker_device_ids]:
+                    reserved[dev_id] = reserved.get(dev_id, 0.0) + entry.approx_gb
+            return reserved
+
     def deploy(self, model_name: str) -> Deployment:
         entry = self.models.get(model_name)
         if entry is None:
@@ -105,7 +121,17 @@ class Deployer:
         if self.active_for(model_name) is not None:
             raise RuntimeError(f"model {model_name} is already deployed")
 
-        devices = [d for d in self.registry.snapshot() if d["online"]]
+        devices = [dict(d) for d in self.registry.snapshot() if d["online"]]
+        reserved = self._pending_reserved_gb()
+        for d in devices:
+            hold = reserved.get(d["device_id"], 0.0)
+            if hold and "inventory" in d and d["inventory"]:
+                d["inventory"] = {
+                    **d["inventory"],
+                    "mem_available": max(
+                        0, int(d["inventory"].get("mem_available", 0) - hold * 1024**3)
+                    ),
+                }
         plan = plan_placement(
             entry.approx_gb, devices, model_name=model_name, busy_device_ids=self._busy_ids()
         )
