@@ -82,12 +82,14 @@ class Deployer:
             return d if d and d.status in ("active", "degraded") else None
 
     def _busy_ids(self) -> set[str]:
+        """Nodes unusable for new plans. Only rpc workers are exclusive in
+        v1 (fixed port 50052): a driver node may host more llama-server
+        instances on distinct ports, enabling multi-model co-location."""
         with self._lock:
             busy = set()
             for d in self._deployments.values():
                 if d.status in ("planning", "provisioning", "active", "degraded"):
                     busy.update(d.worker_device_ids)
-                    busy.add(d.driver_device_id)
             return busy
 
     def _next_server_port(self) -> int:
@@ -236,15 +238,17 @@ class Deployer:
         raise TimeoutError(f"llama-server health check failed for {base_url}")
 
     def _cleanup_partial(self, dep: Deployment) -> None:
+        server_ids = [f"server-{dep.server_port}", "server"]
         for dev_id in [dep.driver_device_id, *dep.worker_device_ids]:
             dev = self.registry.get(dev_id)
             if dev is None:
                 continue
-            try:
-                self._agent_call(dev.control_addr, "POST", "/workers/stop",
-                                 json={"id": "server"}, timeout="start")
-            except Exception:  # noqa: BLE001 -- best-effort cleanup
-                pass
+            for wid in server_ids:
+                try:
+                    self._agent_call(dev.control_addr, "POST", "/workers/stop",
+                                     json={"id": wid}, timeout="start")
+                except Exception:  # noqa: BLE001 -- best-effort cleanup
+                    pass
             try:
                 self._agent_call(dev.control_addr, "POST", "/workers/stop",
                                  json={"id": "rpc"}, timeout="start")

@@ -43,7 +43,8 @@ func (m *WorkerManager) StartRPC(engine EngineInfo, port int) (WorkerStatus, err
 	return m.launch(engine.Dir, engine.RPCPath, args, st)
 }
 
-// StartServer launches a llama-server worker with well-known id "server".
+// StartServer launches a llama-server worker. Multiple servers may coexist
+// on one node (one per model deployment), keyed by port.
 func (m *WorkerManager) StartServer(engine EngineInfo, req StartServerRequest) (WorkerStatus, error) {
 	if engine.ServerPath == "" {
 		return WorkerStatus{}, fmt.Errorf("engine not ready: llama-server binary missing")
@@ -77,7 +78,7 @@ func (m *WorkerManager) StartServer(engine EngineInfo, req StartServerRequest) (
 	args = append(args, req.ExtraArgs...)
 
 	st := WorkerStatus{
-		ID:    "server",
+		ID:    fmt.Sprintf("server-%d", port),
 		Kind:  "server",
 		Port:  port,
 		RPC:   req.RPC,
