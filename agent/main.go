@@ -70,6 +70,7 @@ func (a *Agent) buildAnnounce() Announce {
 		ControlAddr: a.controlAddr(),
 		Inventory:   a.currentInventory(),
 		Workers:     a.workers.Status(),
+		Engine:      a.engine.Current(),
 		TS:          time.Now().Unix(),
 	}
 }

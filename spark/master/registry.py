@@ -26,6 +26,7 @@ class Device:
     control_addr: str
     inventory: dict[str, Any] = field(default_factory=dict)
     workers: list[dict[str, Any]] = field(default_factory=list)
+    engine: dict[str, Any] = field(default_factory=dict)
     last_seen: float = 0.0
     first_seen: float = 0.0
     tcp_observed_host: str = ""
@@ -100,6 +101,8 @@ class DeviceRegistry:
                 dev.inventory = announce["inventory"] or {}
             if "workers" in announce:
                 dev.workers = announce["workers"] or []
+            if "engine" in announce:
+                dev.engine = announce["engine"] or {}
             dev.last_seen = now
             return dev
 
@@ -127,6 +130,7 @@ class DeviceRegistry:
                         "first_seen": dev.first_seen,
                         "inventory": dev.inventory,
                         "workers": dev.workers,
+                        "engine": dev.engine,
                     }
                 )
             return out

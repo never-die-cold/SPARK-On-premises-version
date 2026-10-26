@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from spark.master.deployer import Deployer
 from spark.master.discovery import DiscoveryListener
+from spark.master.metrics import RequestMetrics
 from spark.master.planner import PlanError
 from spark.master.registry import DeviceRegistry
 from spark.master import wol
@@ -79,6 +80,7 @@ def create_app(
     app.state.registry = registry
     app.state.models = models
     app.state.deployer = deployer
+    app.state.metrics = RequestMetrics()
 
     # ---------------- cluster management ----------------
 
@@ -147,6 +149,7 @@ def create_app(
             "devices": devs,
             "deployments": deps,
             "models": [m["name"] for m in await list_models()],
+            "metrics": app.state.metrics.snapshot(),
         }
 
     @app.post("/api/wake")
@@ -208,11 +211,18 @@ def create_app(
         headers = {k: v for k, v in request.headers.items()
                    if k.lower() in ("content-type", "accept", "authorization")}
         client: httpx.AsyncClient = request.app.state.client
+        metrics: RequestMetrics = request.app.state.metrics
 
-        upstream = await client.send(
-            client.build_request(request.method, url, content=body, headers=headers),
-            stream=True,
-        )
+        t0 = time.time()
+        metrics.start()
+        try:
+            upstream = await client.send(
+                client.build_request(request.method, url, content=body, headers=headers),
+                stream=True,
+            )
+        except httpx.HTTPError:
+            metrics.end(time.time() - t0)
+            raise
 
         async def relay():
             try:
@@ -220,6 +230,7 @@ def create_app(
                     yield chunk
             finally:
                 await upstream.aclose()
+                metrics.end(time.time() - t0)
 
         resp_headers = {
             k: v for k, v in upstream.headers.items()

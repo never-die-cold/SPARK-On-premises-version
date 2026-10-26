@@ -55,7 +55,16 @@
     <div class="stat"><b id="n-dev">–</b><span>在线设备 / 总数</span></div>
     <div class="stat"><b id="n-mem">–</b><span>集群可用内存</span></div>
     <div class="stat"><b id="n-dep">–</b><span>活跃部署</span></div>
+    <div class="stat"><b id="n-active">0</b><span>进行中请求</span></div>
+    <div class="stat"><b id="n-total">0</b><span>累计请求</span></div>
+    <div class="stat"><b id="n-p50">–</b><span>P50 延迟</span></div>
   </div>
+
+  <section>
+    <h2>近 60 分钟请求量</h2>
+    <canvas id="spark" width="1000" height="90" style="width:100%;background:var(--card);
+      border:1px solid var(--line);border-radius:10px;"></canvas>
+  </section>
 
   <section>
     <h2>部署模型</h2>
@@ -77,8 +86,9 @@
   <section>
     <h2>设备</h2>
     <table><thead><tr>
-      <th></th><th>名称</th><th>平台</th><th>CPU</th><th>内存(可用/总量)</th><th>GPU</th><th>worker</th>
-    </tr></thead><tbody id="devs"><tr><td colspan="7" class="mono">等待设备加入…（在各设备上运行 spark-agent）</td></tr></tbody></table>
+      <th></th><th>名称</th><th>平台</th><th>CPU</th><th>内存(可用/总量)</th><th>GPU</th>
+      <th>引擎</th><th>worker</th><th>操作</th>
+    </tr></thead><tbody id="devs"><tr><td colspan="9" class="mono">等待设备加入…（在各设备上运行 spark-agent）</td></tr></tbody></table>
   </section>
 
   <section>
@@ -106,6 +116,12 @@ async function refresh(){
     $("n-mem").textContent = gb(mem);
     $("n-dep").textContent = s.deployments_active;
 
+    const m = s.metrics || {};
+    $("n-active").textContent = m.active ?? 0;
+    $("n-total").textContent = m.total ?? 0;
+    $("n-p50").textContent = m.p50_latency_s != null ? (m.p50_latency_s*1000).toFixed(0)+" ms" : "–";
+    drawSpark(m.requests_per_min || []);
+
     $("model").innerHTML = s.models.map(m=>`<option>${m}</option>`).join("");
 
     $("deps").innerHTML = s.deployments.length ? s.deployments.map(d=>`
@@ -114,7 +130,9 @@ async function refresh(){
         <td><span class="tag">${d.mode||"-"}</span></td>
         <td class="mono">${d.driver_device_id||"-"}</td>
         <td class="mono">${(d.worker_device_ids||[]).join("<br>")||"-"}</td>
-        <td><span class="tag ${d.status}">${d.status}${d.error?" · "+d.error:""}</span></td>
+        <td><span class="tag ${d.status}">${d.status}</span>
+            ${d.error?`<div class="mono">${d.error}</div>`:""}
+            ${(d.reasons&&d.reasons.length)?`<div class="mono">${d.reasons[d.reasons.length-1]}</div>`:""}</td>
         <td><button onclick="undeployName('${d.model}')">停止</button></td>
       </tr>`).join("")
       : `<tr><td colspan="6" class="mono">尚未部署；选择模型点击"部署"</td></tr>`;
@@ -123,6 +141,12 @@ async function refresh(){
       const inv=d.inventory||{};
       const gpus=(inv.gpus||[]).map(g=>g.name).join(", ")||"—";
       const workers=(d.workers||[]).map(w=>`${w.id}:${w.state}`).join(", ")||"—";
+      const eng=d.engine||{};
+      const engCell = eng.flavor ? `<span class="tag ${eng.flavor==='cuda'?'active':''}">${eng.flavor}</span>
+         <div class="mono">${eng.tag||''}</div>` : `<span class="mono">未安装</span>`;
+      const btn = d.online
+        ? `<button onclick="sleepDev('${d.device_id}')">休眠</button>`
+        : `<button onclick="wakeDev('${d.device_id}')">唤醒</button>`;
       return `<tr>
         <td><span class="dot ${d.online?"on":"off"}"></span></td>
         <td>${d.name}<div class="mono">${d.device_id}</div></td>
@@ -130,10 +154,41 @@ async function refresh(){
         <td class="mono">${inv.cpu_cores||"?"} 核</td>
         <td class="mono">${gb(inv.mem_available||0)} / ${gb(inv.mem_total||0)}</td>
         <td class="mono">${gpus}</td>
+        <td>${engCell}</td>
         <td class="mono">${workers}</td>
+        <td>${btn}</td>
       </tr>`;}).join("")
-      : `<tr><td colspan="7" class="mono">等待设备加入…（在各设备上运行 spark-agent）</td></tr>`;
+      : `<tr><td colspan="9" class="mono">等待设备加入…（在各设备上运行 spark-agent）</td></tr>`;
   }catch(e){ toast("刷新失败: "+e); }
+}
+
+function drawSpark(series){
+  const cv=$("spark"), ctx=cv.getContext("2d");
+  const W=cv.width, H=cv.height, n=Math.max(series.length,2);
+  ctx.clearRect(0,0,W,H);
+  const max=Math.max(1, ...series.map(p=>p[1]));
+  const x=i=>i*(W/(n-1)), y=v=>H-8-(v/max)*(H-16);
+  ctx.strokeStyle="#58a6ff"; ctx.lineWidth=2; ctx.beginPath();
+  series.forEach((p,i)=>{ i?ctx.lineTo(x(i),y(p[1])):ctx.moveTo(x(i),y(p[1])); });
+  ctx.stroke();
+  ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath();
+  ctx.fillStyle="rgba(88,166,255,.10)"; ctx.fill();
+  ctx.fillStyle="#8b93a3"; ctx.font="11px Consolas,monospace";
+  ctx.fillText(max+" req/min", 8, 14);
+}
+
+async function wakeDev(id){
+  toast(`发送 Wake-on-LAN -> ${id}`);
+  const r = await fetch("/api/wake",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({device_id:id})});
+  const j = await r.json();
+  toast(r.ok ? `魔术包已发送 (${j.bytes_sent} bytes)；设备上线需 30-90 秒` : `唤醒失败: ${j.detail||"?"}`);
+}
+async function sleepDev(id){
+  const r = await fetch("/api/sleep",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({device_id:id})});
+  const j = await r.json();
+  toast(r.ok ? `${id} 休眠指令已发送` : `休眠被拒: ${j.detail||"?"}`);
 }
 
 async function deploy(){

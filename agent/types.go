@@ -43,6 +43,7 @@ type Announce struct {
 	ControlAddr string         `json:"control_addr"`
 	Inventory   Inventory      `json:"inventory"`
 	Workers     []WorkerStatus `json:"workers"`
+	Engine      EngineInfo     `json:"engine,omitempty"`
 	TS          int64          `json:"ts"`
 }
 
