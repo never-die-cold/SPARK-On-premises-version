@@ -67,6 +67,37 @@ def _score(c: Candidate) -> tuple:
     return (1 if c.has_gpu else 0, c.mem_available_gb, c.cpu_cores)
 
 
+def validate_split_network(plan: "PlacementPlan", net_stats: dict) -> list[str]:
+    """Gate split-mode placements on measured link quality.
+
+    net_stats maps device_id -> NetStat (see spark.master.netprobe). A worker
+    whose link is 'poor' cannot carry per-token activation traffic at usable
+    speed; reject the plan with an actionable message. 'slow' links are
+    allowed but annotated. Unknown stats (probe failed) pass through with a
+    warning -- the deployment still works, just maybe slowly.
+    """
+    if plan.mode != "split":
+        return []
+    notes: list[str] = []
+    for dev_id in plan.worker_device_ids:
+        stat = net_stats.get(dev_id)
+        if stat is None or not getattr(stat, "ok", False):
+            notes.append(f"network: {dev_id} probe unavailable; split speed unverified")
+            continue
+        link = stat.link_class
+        label = f"{dev_id} {stat.mbps:.0f}Mbps/{stat.rtt_ms:.1f}ms ({link})"
+        if link == "poor":
+            raise PlanError(
+                f"network too slow for split mode: {label}. "
+                f"Use wired Ethernet (>=100Mbps) or deploy a model that fits one node."
+            )
+        if link in ("slow", "wifi"):
+            notes.append(f"network: {label}; decode may be limited by the link")
+        else:
+            notes.append(f"network: {label}")
+    return notes
+
+
 def plan_placement(
     approx_gb: float,
     devices: Sequence[dict],

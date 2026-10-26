@@ -114,6 +114,29 @@ func (a *Agent) runControlServer(ln net.Listener) error {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 	})
 
+	mux.HandleFunc("GET /netprobe", func(w http.ResponseWriter, r *http.Request) {
+		n, _ := strconv.Atoi(r.URL.Query().Get("bytes"))
+		if n <= 0 {
+			n = 1 << 20
+		}
+		if n > 8<<20 {
+			n = 8 << 20
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(n))
+		buf := make([]byte, 64*1024)
+		for n > 0 {
+			chunk := len(buf)
+			if n < chunk {
+				chunk = n
+			}
+			if _, err := w.Write(buf[:chunk]); err != nil {
+				return
+			}
+			n -= chunk
+		}
+	})
+
 	mux.HandleFunc("POST /power/sleep", func(w http.ResponseWriter, r *http.Request) {
 		// refuse to sleep a node that is serving deployments
 		for _, wk := range a.workers.Status() {

@@ -48,8 +48,18 @@ def create_app(
         if listener:
             listener.start()
         watcher = asyncio.create_task(_degradation_watch(deployer, registry))
+        idle_min = float(os.environ.get("SPARK_IDLE_SLEEP_MIN", "0") or 0)
+        policy = None
+        if idle_min > 0:
+            from spark.master.power import IdlePolicy
+
+            policy = IdlePolicy(deployer, registry, idle_min)
+            log.info("idle auto-sleep enabled: %.0f min", idle_min)
+        idle_watcher = asyncio.create_task(_idle_watch(policy)) if policy else None
         yield
         watcher.cancel()
+        if idle_watcher:
+            idle_watcher.cancel()
         if listener:
             listener.stop()
         await app.state.client.aclose()
@@ -242,3 +252,12 @@ async def _degradation_watch(deployer: Deployer, registry: DeviceRegistry) -> No
         except Exception:  # noqa: BLE001 -- watcher must survive odd states
             log.exception("backend health check failed")
         deployer.check_and_heal()
+
+
+async def _idle_watch(policy) -> None:
+    while True:
+        await asyncio.sleep(10)
+        try:
+            policy.tick()
+        except Exception:  # noqa: BLE001
+            log.exception("idle policy tick failed")

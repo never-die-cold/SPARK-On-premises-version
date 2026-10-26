@@ -76,7 +76,7 @@
 - 清单维度：OS/架构、CPU 核数与型号、总内存/可用内存、数据盘剩余、GPU 探测（nvidia-smi）、外网可达性。
 - 后端选择（M2 已实现）：agent 自动探测 GPU → 下载对应引擎变体（Windows/Linux x64 + NVIDIA → CUDA 构建 + cudart 运行时；macOS → Metal CPU 构建；树莓派/Android → arm64 CPU 构建）；`SPARK_LLAMA_FLAVOR=cpu|cuda|vulkan` 可强制覆盖（Vulkan 覆盖 AMD/Intel 显卡）。
 - GPU 卸载（M2 已实现）：master 对含 GPU 的驱动节点自动附加 `-ngl 99`（`SPARK_NGL` 可覆盖）；实测 0.5B 模型 CPU→GPU 解码提速约 4.5×（见 benchmarks/README.md）。
-- 网络 best-effort 探测（M2 待做）：节点间带宽影响切分收益，规划器可将"带宽过低"降级为"仅单机模式"。
+- 网络探测（M2 已实现）：master 通过 agent 的 `/netprobe` 端点测量带宽与 RTT，按 wired/wifi/slow/poor 分类；split 模式在规划阶段即被门控——任一候选节点为 `poor`（<30Mbps）直接拒绝并给出"改有线/换小模型"的建议，`wifi/slow` 附加延迟警告。探测为 master 视角，作为节点间链路质量的近似（阈值未校准，见 `netprobe.py`）。
 
 ### 4.4 故障自愈（Self-healing，M2 已实现）
 

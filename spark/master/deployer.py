@@ -16,7 +16,8 @@ from typing import Any, Optional
 
 import httpx
 
-from spark.master.planner import PlanError, plan_placement
+from spark.master.planner import PlanError, plan_placement, validate_split_network
+from spark.master.netprobe import probe_all
 from spark.master.registry import DeviceRegistry
 from spark.modelreg import ModelRegistry
 from spark.protocol import DEFAULT_RPC_PORT, DEFAULT_SERVER_PORT_BASE
@@ -86,6 +87,19 @@ class Deployer:
         self.token = token
         self._lock = threading.RLock()
         self._deployments: dict[str, Deployment] = {}
+        # Pooled client for agent calls, created lazily: constructing an
+        # httpx.Client costs ~600ms on some hosts (measured live), and most
+        # Deployer instances in tests never make a call.
+        self._client: Optional[httpx.Client] = None
+
+    def _agent_client(self) -> httpx.Client:
+        with self._lock:
+            if self._client is None:
+                self._client = httpx.Client(
+                    trust_env=False,
+                    limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+                )
+            return self._client
 
     # ---------- reads ----------
 
@@ -152,6 +166,11 @@ class Deployer:
         plan = plan_placement(
             entry.approx_gb, devices, model_name=model_name, busy_device_ids=self._busy_ids()
         )
+        net_notes: list[str] = []
+        if plan.mode == "split":
+            nodes = [self.registry.get(x) for x in plan.node_ids]
+            stats = probe_all([d for d in nodes if d is not None], token=self.token)
+            net_notes = validate_split_network(plan, stats)  # raises PlanError if too slow
         port = self._next_server_port()
         dep = Deployment(
             model=model_name,
@@ -160,7 +179,7 @@ class Deployer:
             driver_device_id=plan.driver_device_id,
             worker_device_ids=plan.worker_device_ids,
             server_port=port,
-            reasons=plan.reasons,
+            reasons=[*plan.reasons, *net_notes],
         )
         with self._lock:
             self._deployments[model_name] = dep
@@ -458,8 +477,8 @@ class Deployer:
         if self.token:
             headers["X-SPARK-Token"] = self.token
         url = f"http://{control_addr}{path}"
-        with httpx.Client(timeout=AGENT_TIMEOUTS[timeout], headers=headers) as client:
-            r = client.request(method, url, json=json)
+        r = self._agent_client().request(method, url, json=json,
+                                         timeout=AGENT_TIMEOUTS[timeout], headers=headers)
         if r.status_code >= 400:
             raise RuntimeError(f"agent {control_addr} {path} -> HTTP {r.status_code}: {r.text[:300]}")
         if r.status_code == 204 or not r.content:

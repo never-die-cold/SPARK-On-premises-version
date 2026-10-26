@@ -17,9 +17,9 @@
 - [x] 故障自动重分片（节点掉线 → 20s 宽限 → 剩余节点重规划，上限 2 次；节点回归 → 部署自动复活）
 - [x] Wake-on-LAN 唤醒（spark wake）+ 休眠命令（spark sleep，有部署时拒绝）
 - [x] 控制通道共享令牌（SPARK_TOKEN，master+agent 双侧校验）
-- [ ] 空闲自动休眠策略（手动命令已就绪，自动判定待做）
+- [x] 空闲自动休眠策略（`SPARK_IDLE_SLEEP_MIN>0` 启用；本地 master 主机与有部署/运行 worker 的设备永不休眠；默认关闭）
 - [x] GPU 探测与 -ngl 自动设置（实测 0.5B CPU→GPU 4.5×；CUDA 13.4 自动下载 + cudart 运行时合并）
-- [ ] 节点间带宽探测进规划器
+- [x] 节点间带宽探测进规划器（/netprobe 探测 + wired/wifi/slow/poor 分类；poor 链路拒绝 split，wifi/slow 警告）
 - [x] 后端进程健康探测（master 每 10s 探 driver /health，连续 3 次失败 → degraded(backend_dead) → 自愈重部署；实测：耗尽 agent 重启配额后 30s 检测、自愈后对话恢复）
 
 ## M3 — 发布流水线

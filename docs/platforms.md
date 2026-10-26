@@ -95,6 +95,8 @@ Docker Desktop（Windows/macOS）注意：容器 NAT 会吞 UDP 广播，给 age
   或依赖 master 的心跳来源地址自动修正（TCP 观测优先，已内置）。
 - 引擎下载走 GitHub Releases：如受限，可手动下载对应 tarball 解压后设置 `SPARK_LLAMA_PATH`。
 - Windows 下杀掉 agent 后如端口仍被占用，检查是否有孤儿进程：`tasklist | findstr spark-agent`。
+- **切分模式的带宽门控**：部署 split 前 master 会探测各节点带宽（`/netprobe`）。低于 30Mbps 的链路会拒绝切分（建议改有线）；80-300Mbps 标记为 Wi-Fi 并警告解码可能受限。阈值可在 `spark/master/netprobe.py` 调整。
+- **空闲自动休眠**（可选）：master 设 `SPARK_IDLE_SLEEP_MIN=30` 后，无部署且无运行 worker 的设备空闲 30 分钟自动休眠（master 本机与有部署的设备永不触发）；`spark wake <device>` 唤醒。
 
 ## 故障排查
 
