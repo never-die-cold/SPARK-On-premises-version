@@ -39,11 +39,22 @@ def create_app(
     token = token or os.environ.get("SPARK_TOKEN", "")
     registry = registry or DeviceRegistry()
     models = models or ModelRegistry.load()
-    deployer = deployer or Deployer(registry, models, token=token)
+    if deployer is None:
+        default_state = os.environ.get(
+            "SPARK_STATE_FILE",
+            str(Path.home() / ".spark-master" / "deployments.json"),
+        )
+        deployer = Deployer(registry, models, token=token, state_path=default_state)
+    else:
+        deployer.token = deployer.token or token
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
+        try:
+            deployer.reconcile()
+        except Exception:  # noqa: BLE001 -- adoption must not block startup
+            log.exception("deployment reconcile failed")
         listener = DiscoveryListener(registry, http_port, token_required=bool(token)) if start_discovery else None
         if listener:
             listener.start()
@@ -252,6 +263,7 @@ async def _degradation_watch(deployer: Deployer, registry: DeviceRegistry) -> No
         except Exception:  # noqa: BLE001 -- watcher must survive odd states
             log.exception("backend health check failed")
         deployer.check_and_heal()
+        deployer.persist()
 
 
 async def _idle_watch(policy) -> None:

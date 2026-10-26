@@ -7,8 +7,10 @@ HTTP surface (httpx, sync -- threads, not asyncio).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import pathlib
 import threading
 import time
 from dataclasses import dataclass, field
@@ -81,16 +83,21 @@ class Deployment:
 
 
 class Deployer:
-    def __init__(self, registry: DeviceRegistry, models: ModelRegistry, token: str = ""):
+    def __init__(self, registry: DeviceRegistry, models: ModelRegistry, token: str = "",
+                 state_path: Optional[str] = None):
         self.registry = registry
         self.models = models
         self.token = token
         self._lock = threading.RLock()
         self._deployments: dict[str, Deployment] = {}
+        # Deployment table persistence: a master restart must not lose track
+        # of llama-servers that are still serving. Empty string disables.
+        self.state_path = state_path
         # Pooled client for agent calls, created lazily: constructing an
         # httpx.Client costs ~600ms on some hosts (measured live), and most
         # Deployer instances in tests never make a call.
         self._client: Optional[httpx.Client] = None
+        self._load_state()
 
     def _agent_client(self) -> httpx.Client:
         with self._lock:
@@ -100,6 +107,77 @@ class Deployer:
                     limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
                 )
             return self._client
+
+    # ---------- state persistence ----------
+
+    def _load_state(self) -> None:
+        if not self.state_path:
+            return
+        try:
+            raw = pathlib.Path(self.state_path).read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return
+        for item in data.get("deployments", []):
+            try:
+                dep = Deployment(
+                    model=item["model"],
+                    status=item.get("status", "stopped"),
+                    mode=item.get("mode", ""),
+                    driver_device_id=item.get("driver_device_id", ""),
+                    worker_device_ids=item.get("worker_device_ids", []),
+                    driver_base_url=item.get("driver_base_url", ""),
+                    server_port=item.get("server_port", 0),
+                    reasons=item.get("reasons", []),
+                    error=item.get("error", ""),
+                    heal_attempts=item.get("heal_attempts", 0),
+                    degraded_cause=item.get("degraded_cause", ""),
+                    created_at=item.get("created_at", time.time()),
+                    updated_at=item.get("updated_at", time.time()),
+                )
+            except KeyError:
+                continue
+            self._deployments[dep.model] = dep
+
+    def _persist(self) -> None:
+        if not self.state_path:
+            return
+        with self._lock:
+            payload = {"deployments": [d.to_dict() for d in self._deployments.values()]}
+        try:
+            p = pathlib.Path(self.state_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(p)
+        except OSError as exc:  # persistence must never break serving
+            log.warning("cannot persist deployment state: %s", exc)
+
+    def reconcile(self) -> None:
+        """Adopt deployments recorded before a master restart: verify their
+        backend is still healthy and mark it active; otherwise flag stale."""
+        for snap in self.deployments():
+            if snap["status"] not in ("active", "degraded", "provisioning"):
+                continue
+            url = snap.get("driver_base_url") or ""
+            healthy = bool(url) and self._probe_health(url)
+            with self._lock:
+                dep = self._deployments.get(snap["model"])
+                if dep is None:
+                    continue
+                if healthy:
+                    dep.status = "active"
+                    dep.error = ""
+                    dep.degraded_cause = ""
+                    dep.reasons.append("adopted after master restart (backend healthy)")
+                else:
+                    dep.status = "failed"
+                    dep.error = "backend not reachable after master restart; redeploy the model"
+                dep.touch()
+        self._persist()
+
+    def persist(self) -> None:
+        self._persist()
 
     # ---------- reads ----------
 
@@ -183,6 +261,7 @@ class Deployer:
         )
         with self._lock:
             self._deployments[model_name] = dep
+        self._persist()
         threading.Thread(target=self._run, args=(dep, entry, plan), daemon=True).start()
         return dep
 
@@ -195,6 +274,7 @@ class Deployer:
                 # background thread still owns it; mark and let it observe
                 dep.status = "stopping"
                 dep.touch()
+        self._persist()
         threading.Thread(target=self._stop, args=(dep,), daemon=True).start()
         return True
 
@@ -468,6 +548,7 @@ class Deployer:
         self._cleanup_partial(dep)
         dep.status = "stopped"
         dep.touch()
+        self._persist()
 
     # ---------- agent transport ----------
 

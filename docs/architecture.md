@@ -83,6 +83,7 @@
 - worker 子进程崩溃：agent 监管器自动重启（指数退避，上限 3 次），上报 master。
 - **后端健康探测（master 侧）**：每 10s 探 driver 的 `/health`，连续 3 次失败 → 部署 degraded（cause=backend_dead）→ 走自愈重部署。覆盖 agent 重启配额耗尽、进程僵死、被外部杀死等 agent 监管覆盖不到的场景。
 - 节点级故障：注册表 TTL 惊逐 → 部署 degraded（cause=node_offline）→ 宽限 20s 后自动重规划（下载/启动全流程复用部署器）；节点回归且 worker 存活 → 自动恢复 active。连续 2 次重规划失败 → 标记 failed 并保留诊断信息。
+- **master 重启收养（M2 已实现）**：部署表持久化到 `~/.spark-master/deployments.json`（`SPARK_STATE_FILE` 可改），重启后对每条记录探测 driver `/health`——健康则收养为 active（llama-server 一直在跑，服务不中断），不健康则标记 failed 提示重新部署。
 - 语义保证：网关对受影响请求返回 `503 + Retry-After`，不静默吞错；自动恢复期间在途请求失败可安全重试。
 
 ## 5. 性能模型（定性）
