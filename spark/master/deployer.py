@@ -45,6 +45,8 @@ class Deployment:
     error: str = ""
     heal_attempts: int = 0
     heal_running: bool = field(default=False, repr=False)  # in-flight guard
+    degraded_cause: str = ""  # node_offline | backend_dead
+    unhealthy_checks: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -60,6 +62,7 @@ class Deployment:
             "reasons": self.reasons,
             "error": self.error,
             "heal_attempts": self.heal_attempts,
+            "degraded_cause": self.degraded_cause,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -172,6 +175,46 @@ class Deployer:
 
     HEAL_GRACE_SECONDS = 20.0   # let flaky Wi-Fi recover before re-planning
     MAX_HEAL_ATTEMPTS = 2
+    HEALTH_FAILS_BEFORE_DEGRADED = 3
+
+    def _probe_health(self, base_url: str) -> bool:
+        try:
+            r = httpx.get(f"{base_url}/health", timeout=3.0)
+            return r.status_code == 200
+        except httpx.HTTPError:
+            return False
+
+    def check_backends(self) -> None:
+        """Detect a live node whose llama-server died (or hung): probe
+        driver /health each watch tick; N consecutive failures degrade the
+        deployment and schedule a heal. Agent supervision restarts crashed
+        workers, so this mainly catches 'failed after restart cap' and
+        unsupervised leftovers."""
+        for snap in self.deployments():
+            if snap["status"] != "active" or not snap["driver_base_url"]:
+                continue
+            model = snap["model"]
+            if self._probe_health(snap["driver_base_url"]):
+                with self._lock:
+                    dep = self._deployments.get(model)
+                    if dep is not None:
+                        dep.unhealthy_checks = 0
+                continue
+            with self._lock:
+                dep = self._deployments.get(model)
+                if dep is None or dep.status != "active":
+                    continue
+                dep.unhealthy_checks += 1
+                if dep.unhealthy_checks < self.HEALTH_FAILS_BEFORE_DEGRADED:
+                    continue
+                dep.unhealthy_checks = 0
+                dep.status = "degraded"
+                dep.degraded_cause = "backend_dead"
+                dep.error = f"llama-server /health failing at {snap['driver_base_url']}"
+                dep.heal_running = True
+                dep.touch()
+            log.warning("deployment %s: backend health failing; scheduling heal", model)
+            threading.Thread(target=self._heal, args=(model,), daemon=True).start()
 
     def check_and_heal(self) -> None:
         """Called by the degradation watcher. Two transitions:
@@ -186,9 +229,11 @@ class Deployer:
             if snap["status"] == "degraded" and not offline:
                 with self._lock:
                     dep = self._deployments.get(model)
-                    if dep is not None and dep.status == "degraded":
+                    if (dep is not None and dep.status == "degraded"
+                            and dep.degraded_cause == "node_offline"):
                         dep.status = "active"
                         dep.error = ""
+                        dep.degraded_cause = ""
                         dep.reasons.append("nodes resumed heartbeating; deployment live again")
                         dep.touch()
                         log.info("deployment %s recovered", model)
@@ -213,6 +258,7 @@ class Deployer:
                 if dep is None or dep.status != "active":
                     continue
                 dep.status = "degraded"
+                dep.degraded_cause = "node_offline"
                 dep.error = f"nodes offline: {', '.join(offline)}"
                 dep.heal_running = True
                 dep.touch()
@@ -236,12 +282,13 @@ class Deployer:
             dep = self._deployments.get(model)
             if dep is None or dep.status != "degraded":
                 return  # recovered on its own, or user intervened
+            cause = dep.degraded_cause or "node_offline"
             dep.heal_attempts += 1
             attempt = dep.heal_attempts
             # retire the old record so deploy() accepts the model again
             dep.status = "stopped"
             dep.touch()
-        log.info("auto-heal %s: attempt %d (re-planning on surviving nodes)", model, attempt)
+        log.info("auto-heal %s: attempt %d (cause=%s, re-planning)", model, attempt, cause)
         self._cleanup_partial_local(model)
         try:
             new_dep = self.deploy(model)
@@ -257,8 +304,9 @@ class Deployer:
                     dep.touch()
             log.warning("auto-heal %s failed: %s", model, exc)
             return
+        label = "backend failure" if cause == "backend_dead" else "node loss"
         with self._lock:
-            new_dep.reasons.insert(0, f"auto-heal: redeployed after node loss (attempt {attempt})")
+            new_dep.reasons.insert(0, f"auto-heal: redeployed after {label} (attempt {attempt})")
             new_dep.heal_attempts = attempt
             new_dep.touch()
 

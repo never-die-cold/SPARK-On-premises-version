@@ -233,8 +233,12 @@ def create_app(
 
 
 async def _degradation_watch(deployer: Deployer, registry: DeviceRegistry) -> None:
-    """Mark deployments degraded when nodes stop heartbeating and let the
-    deployer schedule auto-heal re-planning."""
+    """Two-level health watch: probe live backends, then let the deployer
+    handle node loss / recovery and schedule auto-heals."""
     while True:
         await asyncio.sleep(10)
+        try:
+            deployer.check_backends()
+        except Exception:  # noqa: BLE001 -- watcher must survive odd states
+            log.exception("backend health check failed")
         deployer.check_and_heal()

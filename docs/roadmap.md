@@ -19,7 +19,7 @@
 - [x] 控制通道共享令牌（SPARK_TOKEN，master+agent 双侧校验）
 - [ ] 空闲自动休眠策略（手动命令已就绪，自动判定待做）
 - [ ] GPU 探测与 -ngl 自动设置；节点间带宽探测进规划器
-- [ ] 后端进程健康探测（节点在线但 llama-server 死亡时，master 目前要等请求 502 才发现；应在心跳/巡检中探测 driver_base_url/health 并触发 agent 重启或重分片）
+- [x] 后端进程健康探测（master 每 10s 探 driver /health，连续 3 次失败 → degraded(backend_dead) → 自愈重部署；实测：耗尽 agent 重启配额后 30s 检测、自愈后对话恢复）
 
 ## M3 — 发布流水线
 - [ ] GitHub Actions 多目标构建：windows/amd64、linux/amd64+arm64、darwin/amd64+arm64、android/arm64

@@ -61,6 +61,62 @@ def announce(device_id, free_gb):
     }
 
 
+class TestBackendHealth:
+    def _deployer_with_active(self, monkeypatch, health_ok):
+        registry = DeviceRegistry(ttl=5.0)
+        deployer = Deployer(registry, ModelRegistry.load())
+        monkeypatch.setattr(deployer, "HEAL_GRACE_SECONDS", 0.05)
+        monkeypatch.setattr(deployer, "_cleanup_partial", lambda dep: None)
+        monkeypatch.setattr(deployer, "_probe_health", lambda url: health_ok)
+        registry.upsert(announce("node-a", 4.0))
+
+        def fake_provision(dep, entry, plan):
+            dep.driver_base_url = "http://node-a:8300"
+            dep.status = "active"
+        monkeypatch.setattr(deployer, "_provision", fake_provision)
+        deployer.deploy("qwen2.5-3b-instruct")
+        return deployer
+
+    def test_health_failures_degrade_and_trigger_heal(self, monkeypatch):
+        deployer = self._deployer_with_active(monkeypatch, health_ok=True)
+        monkeypatch.setattr(deployer, "_probe_health", lambda url: False)
+
+        for _ in range(2):  # below threshold
+            deployer.check_backends()
+        snap = {d["model"]: d for d in deployer.deployments()}["qwen2.5-3b-instruct"]
+        assert snap["status"] == "active"
+
+        deployer.check_backends()  # 3rd consecutive failure crosses threshold
+        snap = {d["model"]: d for d in deployer.deployments()}["qwen2.5-3b-instruct"]
+        assert snap["status"] == "degraded"
+        assert snap["degraded_cause"] == "backend_dead"
+
+        time.sleep(0.3)  # heal (grace shrunk) redeploys
+        snap = {d["model"]: d for d in deployer.deployments()}["qwen2.5-3b-instruct"]
+        assert snap["heal_attempts"] == 1
+        assert snap["status"] in ("active", "provisioning")
+
+    def test_healthy_probe_resets_counter(self, monkeypatch):
+        deployer = self._deployer_with_active(monkeypatch, health_ok=True)
+        checks = iter([False, False, True, False, False])
+        monkeypatch.setattr(deployer, "_probe_health", lambda url: next(checks))
+        for _ in range(5):
+            deployer.check_backends()
+        snap = {d["model"]: d for d in deployer.deployments()}["qwen2.5-3b-instruct"]
+        assert snap["status"] == "active"  # never 3 consecutive failures
+
+    def test_backend_dead_is_not_recovered_by_node_watch(self, monkeypatch):
+        deployer = self._deployer_with_active(monkeypatch, health_ok=True)
+        monkeypatch.setattr(deployer, "_probe_health", lambda url: False)
+        for _ in range(3):
+            deployer.check_backends()
+        # nodes are all online; the node-level recovery branch must NOT
+        # flip a backend_dead deployment back to active
+        deployer.check_and_heal()
+        snap = {d["model"]: d for d in deployer.deployments()}["qwen2.5-3b-instruct"]
+        assert snap["degraded_cause"] == "backend_dead"
+
+
 class TestAutoHeal:
     def test_degraded_deployment_heals_onto_surviving_node(self, monkeypatch):
         registry = DeviceRegistry(ttl=0.3)
