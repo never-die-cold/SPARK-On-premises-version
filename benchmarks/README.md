@@ -15,9 +15,13 @@ spark bench --model <name> [--rounds N] [--prompt "..."]
 
 ## 已有结果（诚实声明）
 
-| 日期 | 模型 | 模式 | 节点 | TTFT | decode | 环境 |
-| --- | --- | --- | --- | --- | --- | --- |
-| 2026-10-26 | qwen2.5-0.5b-instruct q4_k_m | single | 1× Windows 笔记本（i7-13650HX 20核, RTX 5060, CPU 推理） | 21-88 ms | 74-75 tok/s | master/agent 同机 loopback |
+| 日期 | 模型 | 模式 | 引擎 | 节点 | TTFT | decode | 环境 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-10-26 | qwen2.5-0.5b-instruct q4_k_m | single | cpu | 1× Windows 笔记本（i7-13650HX 20核, RTX 5060） | 21-88 ms | 74-75 tok/s | master/agent 同机 loopback |
+| 2026-10-26 | qwen2.5-0.5b-instruct q4_k_m | single | **cuda**（`-ngl 99`） | 同上 | 28-58 ms | **326-345 tok/s** | 同上；GPU 显存占用 ≈3.0GB，采样到 74% 利用率 |
+
+**GPU vs CPU ≈ 4.5×（解码吞吐）**，同机同模型对照；引擎由 agent 自动选择（检测到 NVIDIA GPU → 下载 CUDA 13.4 构建 + cudart 运行时），
+master 对有 GPU 的驱动节点自动附加 `-ngl 99`（`SPARK_NGL` 可覆盖）。
 
 - **切分模式（split）尚无实测数据**。多节点 TTFT/吞吐取决于节点间带宽，
   待第二台设备入网后补充 2 节点 × qwen3-8b 的矩阵（有线/Wi-Fi 各一组）。

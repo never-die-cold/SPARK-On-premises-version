@@ -31,27 +31,44 @@ func TestRewriteHFEndpoint(t *testing.T) {
 	}
 }
 
-func TestAssetPatternFor(t *testing.T) {
-	cases := []struct{ goos, goarch, want string }{
-		{"windows", "amd64", "bin-win-cpu-x64.zip"},
-		{"windows", "arm64", "bin-win-cpu-arm64.zip"},
-		{"linux", "amd64", "bin-ubuntu-x64.tar.gz"},
-		{"linux", "arm64", "bin-ubuntu-arm64.tar.gz"},
-		{"darwin", "arm64", "bin-macos-arm64.tar.gz"},
-		{"darwin", "amd64", "bin-macos-x64.tar.gz"},
-		{"android", "arm64", "bin-android-arm64.tar.gz"},
+func TestAssetPlanFor(t *testing.T) {
+	cases := []struct {
+		goos, goarch, flavor string
+		wantPattern          string
+		wantExtra            bool
+	}{
+		{"windows", "amd64", "cpu", "bin-win-cpu-x64.zip", false},
+		{"windows", "amd64", "cuda", "bin-win-cuda-13.4-x64.zip", true},
+		{"windows", "arm64", "cpu", "bin-win-cpu-arm64.zip", false},
+		{"linux", "amd64", "cpu", "bin-ubuntu-x64.tar.gz", false},
+		{"linux", "amd64", "cuda", "bin-ubuntu-cuda-13.4-x64.tar.gz", false},
+		{"linux", "arm64", "cpu", "bin-ubuntu-arm64.tar.gz", false},
+		{"linux", "amd64", "vulkan", "bin-ubuntu-vulkan-x64.tar.gz", false},
+		{"darwin", "arm64", "cpu", "bin-macos-arm64.tar.gz", false},
+		{"darwin", "amd64", "cpu", "bin-macos-x64.tar.gz", false},
+		{"android", "arm64", "cpu", "bin-android-arm64.tar.gz", false},
 	}
 	for _, tc := range cases {
-		got, err := assetPatternFor(tc.goos, tc.goarch)
+		plan, err := assetPlanFor(tc.goos, tc.goarch, tc.flavor)
 		if err != nil {
-			t.Fatalf("assetPatternFor(%s,%s): %v", tc.goos, tc.goarch, err)
+			t.Fatalf("assetPlanFor(%s,%s,%s): %v", tc.goos, tc.goarch, tc.flavor, err)
 		}
-		if got != tc.want {
-			t.Fatalf("assetPatternFor(%s,%s) = %q, want %q", tc.goos, tc.goarch, got, tc.want)
+		if plan.patterns[0] != tc.wantPattern {
+			t.Fatalf("assetPlanFor(%s,%s,%s) first pattern = %q, want %q",
+				tc.goos, tc.goarch, tc.flavor, plan.patterns[0], tc.wantPattern)
+		}
+		if tc.wantExtra && len(plan.extra) == 0 {
+			t.Fatalf("assetPlanFor(%s,%s,%s) missing runtime pack", tc.goos, tc.goarch, tc.flavor)
 		}
 	}
-	if _, err := assetPatternFor("plan9", "386"); err == nil {
+	if _, err := assetPlanFor("plan9", "386", "cpu"); err == nil {
 		t.Fatal("expected error for unsupported platform")
+	}
+	if _, err := assetPlanFor("linux", "arm64", "cuda"); err == nil {
+		t.Fatal("expected error: cuda has no linux arm64 build")
+	}
+	if _, err := assetPlanFor("linux", "amd64", "metal"); err == nil {
+		t.Fatal("expected error for unknown flavor")
 	}
 }
 
@@ -98,6 +115,19 @@ func TestPacketRoundtrip(t *testing.T) {
 	if back.DeviceID != ann.DeviceID || back.ControlAddr != ann.ControlAddr ||
 		back.Inventory.MemAvailable != ann.Inventory.MemAvailable || len(back.Workers) != 1 {
 		t.Fatalf("roundtrip mismatch: %+v", back)
+	}
+}
+
+func TestAssetFileName(t *testing.T) {
+	cases := []struct{ tag, pattern, want string }{
+		{"b11878", "bin-win-cpu-x64.zip", "llama-b11878-bin-win-cpu-x64.zip"},
+		{"b11878", "cudart-llama-bin-win-cuda-13.4-x64.zip", "cudart-llama-bin-win-cuda-13.4-x64.zip"},
+		{"b11878", "llama-b11878-something.zip", "llama-b11878-something.zip"},
+	}
+	for _, tc := range cases {
+		if got := assetFileName(tc.tag, tc.pattern); got != tc.want {
+			t.Fatalf("assetFileName(%q,%q) = %q, want %q", tc.tag, tc.pattern, got, tc.want)
+		}
 	}
 }
 

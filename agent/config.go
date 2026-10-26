@@ -22,6 +22,7 @@ type Config struct {
 	DeviceID    string
 	LLaMAPath   string // directory with llama-server / rpc-server binaries
 	LLaMATag    string // llama.cpp release tag, e.g. b11878
+	LLaMAFlavor string // cpu | cuda | vulkan | auto (default: auto -> cuda when a GPU is present)
 	HFEndpoint  string // huggingface mirror, e.g. https://hf-mirror.com
 	Token       string // shared cluster token for the control channel
 }
@@ -50,6 +51,7 @@ func loadConfig() *Config {
 	flag.StringVar(&cfg.AdvertiseIP, "advertise", envOr("SPARK_ADVERTISE_IP", ""), "IP to advertise to the cluster (default: auto-detect)")
 	flag.StringVar(&cfg.LLaMAPath, "llama-path", envOr("SPARK_LLAMA_PATH", ""), "use local llama.cpp binaries in this directory instead of downloading")
 	flag.StringVar(&cfg.LLaMATag, "llama-tag", envOr("SPARK_LLAMA_TAG", ""), "llama.cpp release tag to use (default: pinned, or latest discovered)")
+	flag.StringVar(&cfg.LLaMAFlavor, "llama-flavor", envOr("SPARK_LLAMA_FLAVOR", "auto"), "engine build: auto|cpu|cuda|vulkan (auto picks cuda when a GPU is detected)")
 	flag.StringVar(&cfg.HFEndpoint, "hf-endpoint", envOr("SPARK_HF_ENDPOINT", ""), "HuggingFace endpoint rewrite for model downloads")
 	flag.StringVar(&cfg.Token, "token", envOr("SPARK_TOKEN", ""), "shared cluster token guarding the control channel")
 	flag.Parse()

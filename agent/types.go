@@ -71,6 +71,7 @@ type EngineInfo struct {
 	Dir        string `json:"dir,omitempty"`
 	ServerPath string `json:"server_path,omitempty"`
 	RPCPath    string `json:"rpc_path,omitempty"`
+	Flavor     string `json:"flavor,omitempty"` // cpu | cuda | vulkan | custom
 }
 
 type AgentStatus struct {

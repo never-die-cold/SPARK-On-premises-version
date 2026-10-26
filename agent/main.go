@@ -97,14 +97,15 @@ func (a *Agent) sleepHost() { sleepHost() }
 
 func main() {
 	cfg := loadConfig()
+	cfg.LLaMAFlavor = resolveEngineFlavor(cfg.LLaMAFlavor)
 	log.SetPrefix("spark-agent ")
 	log.SetFlags(log.LstdFlags)
 
 	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "logs"), 0o755); err != nil {
 		log.Fatalf("cannot create data dir %s: %v", cfg.DataDir, err)
 	}
-	log.Printf("starting: device_id=%s name=%q data_dir=%s control_port=%d",
-		cfg.DeviceID, cfg.Name, cfg.DataDir, cfg.ControlPort)
+	log.Printf("starting: device_id=%s name=%q data_dir=%s control_port=%d engine_flavor=%s",
+		cfg.DeviceID, cfg.Name, cfg.DataDir, cfg.ControlPort, cfg.LLaMAFlavor)
 
 	a := NewAgent(cfg)
 	// kill llama.cpp processes orphaned by a previous agent instance so

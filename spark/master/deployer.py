@@ -32,6 +32,14 @@ AGENT_TIMEOUTS = {
 }
 
 
+def server_extra_args(driver) -> list[str]:
+    """Extra llama-server flags for the driver node. Offload all layers when
+    a GPU is present (SPARK_NGL overrides); CPU-only builds ignore -ngl."""
+    if driver is not None and driver.has_gpu():
+        return ["-ngl", os.environ.get("SPARK_NGL", "99")]
+    return []
+
+
 @dataclass
 class Deployment:
     model: str
@@ -373,6 +381,7 @@ class Deployer:
                 "rpc": rpc_addrs,
                 "ctx": entry.ctx,
                 "threads": max(1, driver.cpu_cores() // 2),
+                "extra_args": server_extra_args(driver),
             },
             timeout="start",
         )

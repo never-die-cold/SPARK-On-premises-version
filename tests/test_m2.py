@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from spark.master import wol
 from spark.master.app import create_app
-from spark.master.deployer import Deployer
+from spark.master.deployer import Deployer, server_extra_args
 from spark.master.registry import DeviceRegistry
 from spark.modelreg import ModelRegistry
 
@@ -59,6 +59,31 @@ def announce(device_id, free_gb):
         "workers": [],
         "ts": int(time.time()),
     }
+
+
+class TestServerArgs:
+    def test_gpu_driver_gets_ngl(self):
+        from spark.master.registry import Device
+
+        gpu_dev = Device(device_id="d", name="d", control_addr="h:1",
+                         inventory={"gpus": [{"name": "RTX", "vram_bytes": 8 << 30}]})
+        assert server_extra_args(gpu_dev) == ["-ngl", "99"]
+
+    def test_cpu_driver_gets_no_flags(self):
+        from spark.master.registry import Device
+
+        cpu_dev = Device(device_id="d", name="d", control_addr="h:1",
+                         inventory={"gpus": []})
+        assert server_extra_args(cpu_dev) == []
+        assert server_extra_args(None) == []
+
+    def test_ngl_env_override(self, monkeypatch):
+        from spark.master.registry import Device
+
+        monkeypatch.setenv("SPARK_NGL", "20")
+        gpu_dev = Device(device_id="d", name="d", control_addr="h:1",
+                         inventory={"gpus": [{"name": "RTX"}]})
+        assert server_extra_args(gpu_dev) == ["-ngl", "20"]
 
 
 class TestBackendHealth:

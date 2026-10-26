@@ -73,9 +73,10 @@
 
 ### 4.3 异构感知（Heterogeneity-aware）
 
-- 清单维度：OS/架构、CPU 核数与型号、总内存/可用内存、数据盘剩余、GPU 探测（best-effort）、外网可达性。
-- 后端选择：同一份 GGUF，Windows x64 用 avx2 构建，树莓派用 arm64 构建，macOS 用 arm64（Metal）；【GPU 自动探测与 `-ngl` 自动设置：M2】。
-- 网络 best-effort 探测（M2）：节点间带宽影响切分收益，规划器可将"带宽过低"降级为"仅单机模式"。
+- 清单维度：OS/架构、CPU 核数与型号、总内存/可用内存、数据盘剩余、GPU 探测（nvidia-smi）、外网可达性。
+- 后端选择（M2 已实现）：agent 自动探测 GPU → 下载对应引擎变体（Windows/Linux x64 + NVIDIA → CUDA 构建 + cudart 运行时；macOS → Metal CPU 构建；树莓派/Android → arm64 CPU 构建）；`SPARK_LLAMA_FLAVOR=cpu|cuda|vulkan` 可强制覆盖（Vulkan 覆盖 AMD/Intel 显卡）。
+- GPU 卸载（M2 已实现）：master 对含 GPU 的驱动节点自动附加 `-ngl 99`（`SPARK_NGL` 可覆盖）；实测 0.5B 模型 CPU→GPU 解码提速约 4.5×（见 benchmarks/README.md）。
+- 网络 best-effort 探测（M2 待做）：节点间带宽影响切分收益，规划器可将"带宽过低"降级为"仅单机模式"。
 
 ### 4.4 故障自愈（Self-healing，M2 已实现）
 

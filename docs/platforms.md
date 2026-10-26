@@ -14,8 +14,10 @@ SPARK 的目标是一套方案覆盖所有个人闲置设备。各平台的差�
 | Android（Termux） | `deploy/android-termux/bootstrap.sh` | termux-wake-lock + Termux:Boot | android-arm64 预构建或源码构建 |
 | 任意（容器化） | `deploy/docker/docker-compose.yml` | docker restart 策略 | ubuntu 预构建 |
 
-> GPU：默认安装 CPU 构建以保证兼容。有 NVIDIA GPU 的设备建议自装 CUDA/Vulkan 版 llama.cpp 后设置
-> `SPARK_LLAMA_PATH` 指向其目录，agent 将直接使用（`-ngl` 自动化在 M2）。
+> **GPU 加速（自动）**：agent 启动时探测 NVIDIA GPU，自动下载 CUDA 引擎 + cudart 运行时；master 自动附加 `-ngl 99`。
+> 实测 RTX 5060：0.5B 模型解码从 75 → 330+ tok/s（约 4.5×）。覆盖/强制选项：
+> `SPARK_LLAMA_FLAVOR=cpu|cuda|vulkan`（Vulkan 面向 AMD/Intel 显卡）、`SPARK_NGL=<层数>`。
+> 还需设备装有 NVIDIA 驱动；CUDA 构建体积较大（约 260MB + 运行时 200MB）。
 
 ## Windows
 
